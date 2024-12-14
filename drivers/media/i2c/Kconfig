@@ -854,6 +854,14 @@ config VIDEO_VD56G3
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called vd56g3.
+config VIDEO_S5KGM2
+	tristate "Samsung S5KGM2 sensor support"
+	help
+	  This is a V4L2 sensor driver for Samsung S5KGM2 raw
+	  camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgm2.
 
 config VIDEO_VGXY61
 	tristate "ST VGXY61 sensor support"
