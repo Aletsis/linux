@@ -892,16 +892,32 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	vfe_buf_flush_pending(output, state);
 
-	if (output->buf[0])
+	if (output->buf[0]){
 		vb2_buffer_done(&output->buf[0]->vb.vb2_buf, state);
+		output->buf[0] = NULL;
+	}
 
-	if (output->buf[1])
+	if (output->buf[1]){
 		vb2_buffer_done(&output->buf[1]->vb.vb2_buf, state);
+		output->buf[1] = NULL;
+	}
 
 	if (output->last_buffer) {
 		vb2_buffer_done(&output->last_buffer->vb.vb2_buf, state);
 		output->last_buffer = NULL;
 	}
+
+	/*
+	 * struct vfe_output (camss-vfe.h:69-77) overlays gen1.{active_buf,
+	 * wait_sof} and gen2.active_num in an unnamed union. Writing the
+	 * gen2 arm unconditionally would corrupt gen1.active_buf on the
+	 * gen1 callers of this shared flush_buffers (vfe_video_ops_gen1
+	 * in camss-vfe-gen1.c). Only zero active_num when the hw_ops
+	 * pointer identifies a gen2 variant (VFE-170 or VFE-480).
+	 */
+	if (vfe->res->hw_ops == &vfe_ops_170 ||
+	    vfe->res->hw_ops == &vfe_ops_480)
+		output->gen2.active_num = 0;
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
