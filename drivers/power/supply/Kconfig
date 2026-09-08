@@ -1215,4 +1215,17 @@ config CHARGER_SM5714
 	  This driver can also be built as a module. If so, the module will be
 	  called sm5714-charger.
 
+config CHARGER_PM6150_MINIMAL
+	tristate "PM6150 minimal charger init"
+	depends on POWER_SUPPLY
+	select REGMAP
+	help
+	  Minimal charger driver for PM6150 SMB5 to set ICL/FCC and enable charging.
+
+config JOYEUSE_BATTERY_SHIM
+	tristate "Joyeuse battery shim"
+	depends on POWER_SUPPLY
+	help
+	  Synthesizes battery power_supply for joyeuse.
+
 endif # POWER_SUPPLY

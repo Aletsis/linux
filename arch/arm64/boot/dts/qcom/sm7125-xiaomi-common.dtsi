@@ -459,11 +459,22 @@
 	connector {
 		compatible = "usb-c-connector";
 
-		power-role = "source";
+		power-role = "dual";
+		try-power-role = "sink";
 		data-role = "dual";
 		self-powered;
 
-		source-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+		/* What the phone wants when acting as sink */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+				PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)
+			     PDO_FIXED(9000, 3000, 0)
+			     PDO_FIXED(12000, 3000, 0)>;
+
+		/* Operating-point hint to TCPM (15 W) */
+		op-sink-microwatt = <15000000>;
+
+		/* What the phone offers when acting as source (OTG) */
+		source-pdos = <PDO_FIXED(5000, 500, PDO_FIXED_DUAL_ROLE |
 				PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>;
 
 		ports {
