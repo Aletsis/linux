@@ -122,3 +122,5 @@ obj-$(CONFIG_CHARGER_QCOM_SMB2)	+= qcom_pmi8998_charger.o
 obj-$(CONFIG_FUEL_GAUGE_MM8013)	+= mm8013.o
 obj-$(CONFIG_BATTERY_SM5714)	+= sm5714-fg.o
 obj-$(CONFIG_CHARGER_SM5714)	+= sm5714-charger.o
+obj-$(CONFIG_CHARGER_PM6150_MINIMAL)	+= pm6150_chgr_minimal.o
+obj-$(CONFIG_JOYEUSE_BATTERY_SHIM)	+= joyeuse_battery_shim.o
