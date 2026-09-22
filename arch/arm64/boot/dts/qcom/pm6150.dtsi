@@ -63,6 +63,18 @@
 			};
 		};
 
+		pm6150_charger: charger@1000 {
+			compatible = "qcom,pm6150-charger";
+			reg = <0x1000>;
+			interrupts = <0x0 0x13 0x04 IRQ_TYPE_EDGE_BOTH>,
+				     <0x0 0x13 0x06 IRQ_TYPE_EDGE_RISING>,
+				     <0x0 0x12 0x02 IRQ_TYPE_EDGE_BOTH>,
+				     <0x0 0x16 0x01 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "usb-plugin", "usbin-icl-change",
+					  "bat-ov", "wdog-bark";
+			status = "disabled";
+		};
+
 		pm6150_vbus: usb-vbus-regulator@1100 {
 			compatible = "qcom,pm6150-vbus-reg",
 				     "qcom,pm8150b-vbus-reg";
@@ -129,6 +141,24 @@
 			channel@6 {
 				reg = <ADC5_DIE_TEMP>;
 				label = "die_temp";
+			};
+
+			channel@7 {
+				reg = <ADC5_USB_IN_I>;
+				label = "usb_in_i";
+				qcom,pre-scaling = <1 1>;
+			};
+
+			channel@8 {
+				reg = <ADC5_USB_IN_V_16>;
+				label = "usb_in_v";
+				qcom,pre-scaling = <1 16>;
+			};
+
+			channel@84 {
+				reg = <ADC5_VBAT_SNS>;
+				label = "vbat_sns";
+				qcom,pre-scaling = <1 3>;
 			};
 
 			bat_therm@4a {
