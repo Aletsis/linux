@@ -129,9 +129,9 @@
 		vdd-px-supply = <&vreg_l10a_1p8>;
 		vdd-mic-bias-supply = <&vreg_bob>;
 
-		qcom,micbias1-microvolt = <1800000>;
-		qcom,micbias2-microvolt = <1800000>;
-		qcom,micbias3-microvolt = <1800000>;
+		qcom,micbias1-microvolt = <2700000>;
+		qcom,micbias2-microvolt = <2700000>;
+		qcom,micbias3-microvolt = <2700000>;
 		qcom,micbias4-microvolt = <1800000>;
 		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
 		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
@@ -845,6 +845,7 @@
 	audio-routing =
 		"IN1_HPHL", "HPHL_OUT",
 		"IN2_HPHR", "HPHR_OUT",
+		"IN3_AUX", "AUX_OUT",
 		"AMIC1", "MIC BIAS1",
 		"AMIC2", "MIC BIAS2",
 		"AMIC3", "MIC BIAS3",
