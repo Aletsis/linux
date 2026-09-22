@@ -6,6 +6,7 @@
 #include <linux/iio/consumer.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/of.h>
@@ -15,6 +16,10 @@
 #include <linux/regmap.h>
 
 /* BATT offsets */
+#define QG_PERPH_SUBTYPE_REG		0x05
+#define QG_ADC_IBAT_5A			0x03
+#define QG_ADC_IBAT_10A			0x04
+
 #define QG_S2_NORMAL_AVG_V_DATA0_REG	0x80 /* 2-byte 0x80-0x81 */
 #define QG_S2_NORMAL_AVG_I_DATA0_REG	0x82 /* 2-byte 0x82-0x83 */
 #define QG_LAST_ADC_V_DATA0_REG		0xc0 /* 2-byte 0xc0-0xc1 */
@@ -28,6 +33,7 @@ struct qcom_qg_chip {
 	struct device *dev;
 	struct regmap *regmap;
 	unsigned int base;
+	unsigned int current_scale_na;
 
 	struct iio_channel *batt_therm_chan;
 
@@ -50,7 +56,8 @@ static int qcom_qg_get_current(struct qcom_qg_chip *chip, u8 offset, int *val)
 	}
 
 	temp = (s16)(readval[1] << 8 | readval[0]);
-	*val = div_s64((s64)temp * 152588, 1000);
+	/* Invert sign: positive = charging, negative = discharging per Linux ABI */
+	*val = -div_s64((s64)temp * chip->current_scale_na, 1000);
 
 	return 0;
 }
@@ -72,23 +79,65 @@ static int qcom_qg_get_voltage(struct qcom_qg_chip *chip, u8 offset, int *val)
 	return 0;
 }
 
-/*
- * Yes, this function simply calculates the capacity based on
- * the current voltage. This will be rewritten in the future.
- */
+static int qcom_qg_get_status(struct qcom_qg_chip *chip, int *val)
+{
+	int ret, current_now, voltage_now;
+	int voltage_max = chip->batt_info->voltage_max_design_uv;
+
+	ret = qcom_qg_get_current(chip, QG_LAST_ADC_I_DATA0_REG, &current_now);
+	if (ret)
+		return ret;
+
+	ret = qcom_qg_get_voltage(chip, QG_LAST_ADC_V_DATA0_REG, &voltage_now);
+	if (ret)
+		return ret;
+
+	/*
+	 * In Linux power supply ABI convention, positive current indicates
+	 * charging into the battery, negative current indicates discharging.
+	 * If near max voltage and current is negligible, the battery is full.
+	 */
+	if (voltage_now >= (voltage_max - 50000) && current_now >= -50000 && current_now <= 50000)
+		*val = POWER_SUPPLY_STATUS_FULL;
+	else if (current_now > 50000)
+		*val = POWER_SUPPLY_STATUS_CHARGING;
+	else if (current_now < -50000)
+		*val = POWER_SUPPLY_STATUS_DISCHARGING;
+	else
+		*val = POWER_SUPPLY_STATUS_NOT_CHARGING;
+
+	return 0;
+}
+
 static int qcom_qg_get_capacity(struct qcom_qg_chip *chip, int *val)
 {
-	int ret, voltage_now;
+	int ret, voltage_now, temp = 25;
 	int voltage_min = chip->batt_info->voltage_min_design_uv;
 	int voltage_max = chip->batt_info->voltage_max_design_uv;
 
-	ret = qcom_qg_get_voltage(chip,
-				QG_S2_NORMAL_AVG_V_DATA0_REG, &voltage_now);
+	ret = qcom_qg_get_voltage(chip, QG_S2_NORMAL_AVG_V_DATA0_REG,
+				  &voltage_now);
 	if (ret) {
 		dev_err(chip->dev, "Failed to get current voltage: %d\n", ret);
 		return ret;
 	}
 
+	if (chip->batt_therm_chan) {
+		int temp_mc;
+
+		ret = iio_read_channel_processed(chip->batt_therm_chan, &temp_mc);
+		if (!ret)
+			temp = temp_mc / 1000;
+	}
+
+	/* Try OCV lookup table if provided by monitored-battery DT */
+	ret = power_supply_batinfo_ocv2cap(chip->batt_info, voltage_now, temp);
+	if (ret >= 0) {
+		*val = clamp(ret, 0, 100);
+		return 0;
+	}
+
+	/* Fallback to simple voltage-linear estimation */
 	if (voltage_now <= voltage_min)
 		*val = 0;
 	else if (voltage_now >= voltage_max)
@@ -126,10 +175,9 @@ static int qcom_qg_get_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
-		val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
-		break;
+		return qcom_qg_get_status(chip, &val->intval);
 	case POWER_SUPPLY_PROP_SCOPE:
-		val->intval = POWER_SUPPLY_SCOPE_DEVICE;
+		val->intval = POWER_SUPPLY_SCOPE_SYSTEM;
 		break;
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
@@ -141,14 +189,14 @@ static int qcom_qg_get_property(struct power_supply *psy,
 		val->intval = chip->batt_info->voltage_min_design_uv;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		ret = qcom_qg_get_voltage(chip,
-				QG_LAST_ADC_V_DATA0_REG, &val->intval);
+		ret = qcom_qg_get_voltage(chip, QG_LAST_ADC_V_DATA0_REG,
+					  &val->intval);
 		if (ret)
 			return ret;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_AVG:
-		ret = qcom_qg_get_voltage(chip,
-				QG_S2_NORMAL_AVG_V_DATA0_REG, &val->intval);
+		ret = qcom_qg_get_voltage(chip, QG_S2_NORMAL_AVG_V_DATA0_REG,
+					  &val->intval);
 		if (ret)
 			return ret;
 		break;
@@ -158,14 +206,14 @@ static int qcom_qg_get_property(struct power_supply *psy,
 			return ret;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		ret = qcom_qg_get_current(chip,
-				QG_LAST_ADC_I_DATA0_REG, &val->intval);
+		ret = qcom_qg_get_current(chip, QG_LAST_ADC_I_DATA0_REG,
+					  &val->intval);
 		if (ret)
 			return ret;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_AVG:
-		ret = qcom_qg_get_current(chip,
-				QG_S2_NORMAL_AVG_I_DATA0_REG, &val->intval);
+		ret = qcom_qg_get_current(chip, QG_S2_NORMAL_AVG_I_DATA0_REG,
+					  &val->intval);
 		if (ret)
 			return ret;
 		break;
@@ -174,7 +222,8 @@ static int qcom_qg_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		ret = nvmem_device_read(chip->sdam,
-				QG_SDAM_LEARNED_CAPACITY_OFFSET, 2, &val->intval);
+					QG_SDAM_LEARNED_CAPACITY_OFFSET, 2,
+					&val->intval);
 		if (ret < 0)
 			return ret;
 		val->intval *= 1000; /* mAh to uAh */
@@ -210,6 +259,7 @@ static int qcom_qg_probe(struct platform_device *pdev)
 {
 	struct qcom_qg_chip *chip;
 	struct power_supply_config psy_cfg = {};
+	unsigned int subtype;
 	int ret;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
@@ -229,6 +279,25 @@ static int qcom_qg_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return dev_err_probe(chip->dev, ret,
 				     "Couldn't read base address\n");
+
+	ret = regmap_read(chip->regmap, chip->base + QG_PERPH_SUBTYPE_REG,
+			  &subtype);
+	if (ret)
+		return dev_err_probe(chip->dev, ret,
+				     "Couldn't read QGauge subtype\n");
+
+	/* Current ADC resolution in nA per LSB. */
+	switch (subtype) {
+	case QG_ADC_IBAT_5A:
+		chip->current_scale_na = 152588;
+		break;
+	case QG_ADC_IBAT_10A:
+		chip->current_scale_na = 305176;
+		break;
+	default:
+		return dev_err_probe(chip->dev, -ENODEV,
+				     "Unsupported QGauge subtype: %#x\n", subtype);
+	}
 
 	/* ADC for thermal channel */
 	chip->batt_therm_chan = devm_iio_channel_get(chip->dev, "batt-therm");
