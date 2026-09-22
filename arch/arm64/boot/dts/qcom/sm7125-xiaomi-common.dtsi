@@ -44,6 +44,8 @@
 
 		voltage-min-design-microvolt = <3400000>;
 		voltage-max-design-microvolt = <4400000>;
+		constant-charge-current-max-microamp = <2000000>;
+		charge-term-current-microamp = <350000>;
 	};
 
 	gpio_keys: gpio-keys {
@@ -434,6 +436,16 @@
 	qcom,cabc;
 	qcom,cabc-sel = <1>;
 	qcom,num-strings = <3>;
+	status = "okay";
+};
+
+&pm6150_charger {
+	power-supplies = <&pm6150_typec>;
+	input-current-limit-microamp = <1800000>;
+	io-channels = <&pm6150_adc ADC5_USB_IN_I>,
+		      <&pm6150_adc ADC5_USB_IN_V_16>;
+	io-channel-names = "usbin_i", "usbin_v";
+	monitored-battery = <&battery>;
 	status = "okay";
 };
 
