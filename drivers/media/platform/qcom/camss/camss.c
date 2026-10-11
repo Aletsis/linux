@@ -2414,6 +2414,7 @@ static int camss_of_parse_endpoint_node(struct device *dev,
 	struct v4l2_mbus_config_mipi_csi2 *mipi_csi2;
 	struct v4l2_fwnode_endpoint vep = { { 0 } };
 	unsigned int i;
+	u32 bus_type = 0;
 	int ret;
 
 	ret = v4l2_fwnode_endpoint_parse(of_fwnode_handle(node), &vep);
@@ -2422,10 +2423,17 @@ static int camss_of_parse_endpoint_node(struct device *dev,
 
 	csd->interface.csiphy_id = vep.base.port;
 
+	if (vep.bus_type == V4L2_MBUS_CSI2_CPHY ||
+	    (!of_property_read_u32(node, "bus-type", &bus_type) && bus_type == 1))
+		lncfg->is_cphy = true;
+
 	mipi_csi2 = &vep.bus.mipi_csi2;
 	lncfg->clk.pos = mipi_csi2->clock_lane;
 	lncfg->clk.pol = mipi_csi2->lane_polarities[0];
 	lncfg->num_data = mipi_csi2->num_data_lanes;
+
+	dev_info(dev, "endpoint %pOF: port=%d, is_cphy=%d, num_data=%d\n",
+		 node, csd->interface.csiphy_id, lncfg->is_cphy, lncfg->num_data);
 
 	lncfg->data = devm_kcalloc(dev,
 				   lncfg->num_data, sizeof(*lncfg->data),

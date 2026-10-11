@@ -222,6 +222,10 @@ static void vfe_global_reset(struct vfe_device *vfe)
 
 static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 {
+	struct v4l2_pix_format_mplane *pix =
+		&line->video_out.active_fmt.fmt.pix_mp;
+	u32 stride = pix->plane_fmt[0].bytesperline;
+	u32 width = pix->width;
 	u32 val;
 
 	/*Set Debug Registers*/
@@ -244,7 +248,7 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 
 	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
 
-	val = WM_BUFFER_DEFAULT_WIDTH;
+	val = stride ? stride : WM_BUFFER_DEFAULT_WIDTH;
 	writel_relaxed(val, vfe->base + VFE_BUS_WM_BUFFER_WIDTH_CFG(wm));
 
 	val = 0;
@@ -254,13 +258,15 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 	writel_relaxed(val, vfe->base + VFE_BUS_WM_PACKER_CFG(wm)); // XXX 1 for PLAIN8?
 
 	/* Configure stride for RDIs */
-	val = WM_STRIDE_DEFAULT_STRIDE;
+	val = stride ? stride : WM_STRIDE_DEFAULT_STRIDE;
 	writel_relaxed(val, vfe->base + VFE_BUS_WM_STRIDE(wm));
 
-	/* Enable WM */
-	val = 1 << WM_CFG_EN |
-	      MODE_MIPI_RAW << WM_CFG_MODE;
-	writel_relaxed(val, vfe->base + VFE_BUS_WM_CFG(wm));
+	dev_info(vfe->camss->dev, "vfe%d wm_start: wm=%d width_cfg=%u stride=%u (pix_w=%u bpl=%u)\n",
+		 vfe->id, wm, stride ? stride : WM_BUFFER_DEFAULT_WIDTH,
+		 stride ? stride : WM_STRIDE_DEFAULT_STRIDE, width, stride);
+
+	writel_relaxed(0x82, vfe->base + 0x226c);
+	writel_relaxed(0xf, vfe->base + 0x225c);
 }
 
 static void vfe_wm_stop(struct vfe_device *vfe, u8 wm)
@@ -275,9 +281,13 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 	struct v4l2_pix_format_mplane *pix =
 		&line->video_out.active_fmt.fmt.pix_mp;
 	u32 stride = pix->plane_fmt[0].bytesperline;
+	u32 readback;
 
 	writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
 	writel_relaxed(stride * pix->height, vfe->base + VFE_BUS_WM_FRAME_INC(wm));
+	readback = readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
+	dev_info(vfe->camss->dev, "vfe%d wm_update: wm=%d addr=0x%08x (rb=0x%08x) stride=%u inc=%u\n",
+		 vfe->id, wm, addr, readback, stride, stride * pix->height);
 }
 
 static void vfe_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
@@ -381,8 +391,40 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	for (wm = 0; wm < MSM_VFE_IMAGE_MASTERS_NUM; wm++)
 		if (status0 & BIT(9))
-			if (vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm))
+			if (vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm)) {
+				u32 wm_stat0 = readl_relaxed(vfe->base + VFE_BUS_WM_STATUS0(wm));
+				u32 wm_stat1 = readl_relaxed(vfe->base + VFE_BUS_WM_STATUS1(wm));
+				u32 wm_img = readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
+				dev_info_ratelimited(vfe->camss->dev, "vfe%d BUF_DONE(wm%d): stat0=0x%08x stat1=0x%08x img=0x%08x\n",
+						     vfe->id, wm, wm_stat0, wm_stat1, wm_img);
 				vfe->isr_ops.wm_done(vfe, wm);
+			}
+
+	if (vfe_bus_status[0] & STATUS0_VIOLATION) {
+		u32 bus_viol = readl_relaxed(vfe->base + 0x2270);
+		u32 core_viol = readl_relaxed(vfe->base + 0x07c);
+		u32 comp_err = readl_relaxed(vfe->base + 0x206c);
+		u32 comp_ovrw = readl_relaxed(vfe->base + 0x2070);
+		u32 dbg_cfg = readl_relaxed(vfe->base + 0x226c);
+		u32 wm_stat0 = readl_relaxed(vfe->base + 0x2200);
+		u32 wm_stat1 = readl_relaxed(vfe->base + 0x2204);
+		u32 wm_cfg = readl_relaxed(vfe->base + 0x2208);
+		u32 wm_img = readl_relaxed(vfe->base + 0x2214);
+		u32 wm_off = readl_relaxed(vfe->base + 0x2218);
+		u32 wm_w = readl_relaxed(vfe->base + 0x221c);
+		u32 wm_h = readl_relaxed(vfe->base + 0x2220);
+		u32 wm_str = readl_relaxed(vfe->base + 0x2228);
+		u32 wm_inc = readl_relaxed(vfe->base + 0x2258);
+		u32 wm_burst = readl_relaxed(vfe->base + 0x225c);
+		dev_err(vfe->camss->dev, "vfe%d BUS VIOLATION: bus_viol=0x%08x core_viol=0x%08x comp_err=0x%08x comp_ovrw=0x%08x dbg_cfg=0x%08x\n",
+			vfe->id, bus_viol, core_viol, comp_err, comp_ovrw, dbg_cfg);
+		dev_err(vfe->camss->dev, "vfe%d WM0: stat0=0x%08x stat1=0x%08x cfg=0x%08x img=0x%08x off=0x%08x w=0x%08x h=0x%08x str=0x%08x inc=%u burst=0x%08x\n",
+			vfe->id, wm_stat0, wm_stat1, wm_cfg, wm_img, wm_off, wm_w, wm_h, wm_str, wm_inc, wm_burst);
+	}
+
+	if (status0 || status1 || vfe_bus_status[0] || vfe_bus_status[1])
+		dev_info_ratelimited(vfe->camss->dev, "vfe%d_isr: s0=0x%08x s1=0x%08x bus0=0x%08x bus1=0x%08x\n",
+				     vfe->id, status0, status1, vfe_bus_status[0], vfe_bus_status[1]);
 
 	return IRQ_HANDLED;
 }
@@ -487,7 +529,15 @@ static int vfe_enable_output(struct vfe_line *line)
 		vfe_wm_update(vfe, output->wm_idx[0], output->buf[i]->addr[0], line);
 	}
 
-	ops->reg_update(vfe, line->id);
+	dev_info(vfe->camss->dev, "vfe%d enable_output: wm=%d active_num=%d buf0=%px (addr=0x%08x)\n",
+		 vfe->id, output->wm_idx[0], output->gen2.active_num, output->buf[0],
+		 output->buf[0] ? output->buf[0]->addr[0] : 0);
+
+	if (output->gen2.active_num > 0) {
+		u32 val = 1 << WM_CFG_EN | MODE_MIPI_RAW << WM_CFG_MODE;
+		writel_relaxed(val, vfe->base + VFE_BUS_WM_CFG(output->wm_idx[0]));
+		ops->reg_update(vfe, line->id);
+	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
@@ -612,10 +662,12 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 
 	output->buf[index] = vfe_buf_get_pending(output);
 
-	if (output->buf[index])
+	if (output->buf[index]) {
 		vfe_wm_update(vfe, output->wm_idx[0], output->buf[index]->addr[0], line);
-	else
+		vfe_reg_update(vfe, line->id);
+	} else {
 		output->gen2.active_num--;
+	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
@@ -652,6 +704,11 @@ static int vfe_queue_buffer(struct camss_video *vid,
 	if (output->state == VFE_OUTPUT_ON && output->gen2.active_num < 2) {
 		output->buf[output->gen2.active_num++] = buf;
 		vfe_wm_update(vfe, output->wm_idx[0], buf->addr[0], line);
+		if (output->gen2.active_num == 1) {
+			u32 val = 1 << WM_CFG_EN | MODE_MIPI_RAW << WM_CFG_MODE;
+			writel_relaxed(val, vfe->base + VFE_BUS_WM_CFG(output->wm_idx[0]));
+		}
+		vfe_reg_update(vfe, line->id);
 	} else {
 		vfe_buf_add_pending(output, buf);
 	}

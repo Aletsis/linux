@@ -722,6 +722,7 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 	q->buf_struct_size = sizeof(struct camss_buffer);
 	q->dev = video->camss->dev;
 	q->lock = &video->q_lock;
+	q->min_queued_buffers = 1;
 	ret = vb2_queue_init(q);
 	if (ret < 0) {
 		dev_err(v4l2_dev->dev, "Failed to init vb2 queue: %d\n", ret);

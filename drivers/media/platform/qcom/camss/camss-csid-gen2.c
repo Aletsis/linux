@@ -188,13 +188,30 @@ static void __csid_configure_rx(struct csid_device *csid,
 	val = (lane_cnt - 1) << CSI2_RX_CFG0_NUM_ACTIVE_LANES;
 	val |= phy->lane_assign << CSI2_RX_CFG0_DL0_INPUT_SEL;
 	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
+	if (phy->is_cphy)
+		val |= 1 << CSI2_RX_CFG0_PHY_TYPE_SEL;
+	dev_info(csid->camss->dev, "csid%d configure_rx: cfg0=0x%08x (is_cphy=%d, lane_cnt=%d, lane_assign=0x%x)\n",
+		 csid->id, val, phy->is_cphy, lane_cnt, phy->lane_assign);
 	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
 
 	val = 1 << CSI2_RX_CFG1_PACKET_ECC_CORRECTION_EN;
 	if (vc > 3)
 		val |= 1 << CSI2_RX_CFG1_VC_MODE;
 	val |= 1 << CSI2_RX_CFG1_MISR_EN;
+	val |= CGC_MODE_ALWAYS_ON << CSI2_RX_CFG1_CGC_MODE;
 	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG1);
+
+	/* Enable RX IRQs and RDI0/RDI1 IRQs to catch framing errors / FIFO overflow */
+	writel_relaxed(0xFFFFFFFF, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+	writel_relaxed(0xFFFFFFFF, csid->base + CSID_CSI2_RX_IRQ_MASK);
+	writel_relaxed(0xFFFFFFFF, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(0));
+	writel_relaxed(0xFFFFFFFF, csid->base + CSID_CSI2_RDIN_IRQ_MASK(0));
+	writel_relaxed(0xFFFFFFFF, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(1));
+	writel_relaxed(0xFFFFFFFF, csid->base + CSID_CSI2_RDIN_IRQ_MASK(1));
+
+	/* Enable packet header capture in registers 0x120-0x13c */
+	/* bit 0=long en, 1=short en, 2=cphy en; long dt=0x2b << 4, long vc=0 << 10 */
+	writel_relaxed(0x7 | (0x2b << 4) | (0 << 10), csid->base + 0x108);
 }
 
 static void __csid_ctrl_rdi(struct csid_device *csid, int enable, u8 rdi)
@@ -279,7 +296,8 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 
 	 *
 	 * CID   : VC 3:0 << 2 | DT_ID 1:0
 	 */
-	u8 dt_id = vc & 0x03;
+	u8 target_vc = vc;
+	u8 dt_id = target_vc & 0x03;
 
 	val = 1 << RDI_CFG0_BYTE_CNTR_EN;
 	val |= 1 << RDI_CFG0_FORMAT_MEASURE_EN;
@@ -287,8 +305,10 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 
 	/* note: for non-RDI path, this should be format->decode_format */
 	val |= DECODE_FORMAT_PAYLOAD_ONLY << RDI_CFG0_DECODE_FORMAT;
 	val |= format->data_type << RDI_CFG0_DATA_TYPE;
-	val |= vc << RDI_CFG0_VIRTUAL_CHANNEL;
+	val |= target_vc << RDI_CFG0_VIRTUAL_CHANNEL;
 	val |= dt_id << RDI_CFG0_DT_ID;
+	dev_info(csid->camss->dev, "csid%d configure_rdi%d: code=0x%04x dt=0x%02x cfg0=0x%08x\n",
+		 csid->id, vc, input_format->code, format ? format->data_type : 0xff, val);
 	writel_relaxed(val, csid->base + CSID_RDI_CFG0(vc));
 
 	/* CSID_TIMESTAMP_STB_POST_IRQ */
@@ -325,6 +345,34 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 
 	val = readl_relaxed(csid->base + CSID_RDI_CFG0(vc));
 	val |=  enable << RDI_CFG0_ENABLE;
 	writel_relaxed(val, csid->base + CSID_RDI_CFG0(vc));
+
+	if (csid->id == 0) {
+		/* Configure RDI1 as sink for VC=1, DT=0x30 (Samsung PDAF/embedded stats) */
+		u32 rdi1_val = (1 << RDI_CFG0_BYTE_CNTR_EN) |
+			       (1 << RDI_CFG0_FORMAT_MEASURE_EN) |
+			       (1 << RDI_CFG0_TIMESTAMP_EN) |
+			       (DECODE_FORMAT_PAYLOAD_ONLY << RDI_CFG0_DECODE_FORMAT) |
+			       (0x30 << RDI_CFG0_DATA_TYPE) |
+			       (1 << RDI_CFG0_VIRTUAL_CHANNEL) |
+			       (1 << RDI_CFG0_DT_ID) |
+			       (enable << RDI_CFG0_ENABLE);
+		writel_relaxed(rdi1_val, csid->base + CSID_RDI_CFG0(1));
+		writel_relaxed(2 << RDI_CFG1_TIMESTAMP_STB_SEL, csid->base + CSID_RDI_CFG1(1));
+		writel_relaxed(1, csid->base + CSID_RDI_FRM_DROP_PERIOD(1));
+		writel_relaxed(0, csid->base + CSID_RDI_FRM_DROP_PATTERN(1));
+		writel_relaxed(1, csid->base + CSID_RDI_IRQ_SUBSAMPLE_PERIOD(1));
+		writel_relaxed(0, csid->base + CSID_RDI_IRQ_SUBSAMPLE_PATTERN(1));
+		writel_relaxed(1, csid->base + CSID_RDI_RPP_PIX_DROP_PERIOD(1));
+		writel_relaxed(0, csid->base + CSID_RDI_RPP_PIX_DROP_PATTERN(1));
+		writel_relaxed(1, csid->base + CSID_RDI_RPP_LINE_DROP_PERIOD(1));
+		writel_relaxed(0, csid->base + CSID_RDI_RPP_LINE_DROP_PATTERN(1));
+		if (enable)
+			writel_relaxed(HALT_CMD_RESUME_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD,
+				       csid->base + CSID_RDI_CTRL(1));
+		else
+			writel_relaxed(HALT_CMD_HALT_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD,
+				       csid->base + CSID_RDI_CTRL(1));
+	}
 }
 
 static void csid_configure_stream(struct csid_device *csid, u8 enable)
@@ -384,29 +432,60 @@ static u32 csid_hw_version(struct csid_device *csid)
 static irqreturn_t csid_isr(int irq, void *dev)
 {
 	struct csid_device *csid = dev;
-	u32 val;
+	u32 val, top_val, rx_val, rdi_val = 0;
 	u8 reset_done;
 	int i;
 
-	val = readl_relaxed(csid->base + CSID_TOP_IRQ_STATUS);
-	writel_relaxed(val, csid->base + CSID_TOP_IRQ_CLEAR);
-	reset_done = val & BIT(TOP_IRQ_STATUS_RESET_DONE);
+	top_val = readl_relaxed(csid->base + CSID_TOP_IRQ_STATUS);
+	writel_relaxed(top_val, csid->base + CSID_TOP_IRQ_CLEAR);
+	reset_done = top_val & BIT(TOP_IRQ_STATUS_RESET_DONE);
 
-	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
-	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+	rx_val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	writel_relaxed(rx_val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
 
 	/* Read and clear IRQ status for each enabled RDI channel */
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
 		if (csid->phy.en_vc & BIT(i)) {
 			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
 			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+			if (i == 0) rdi_val = val;
 		}
+
+	if (csid->id == 0) {
+		val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(1));
+		writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(1));
+	}
 
 	val = 1 << IRQ_CMD_CLEAR;
 	writel_relaxed(val, csid->base + CSID_IRQ_CMD);
 
 	if (reset_done)
 		complete(&csid->reset_complete);
+
+	if (top_val || rx_val || rdi_val) {
+		u32 ping0 = readl_relaxed(csid->base + 0x3e0);
+		u32 pong0 = readl_relaxed(csid->base + 0x3e4);
+		u32 ping1 = readl_relaxed(csid->base + 0x4e0);
+		u32 pong1 = readl_relaxed(csid->base + 0x4e4);
+		dev_info_ratelimited(csid->camss->dev, "csid%d_isr: top=0x%08x rx=0x%08x rdi0=0x%08x (rdi0: %u/%u | rdi1: %u/%u)\n",
+				     csid->id, top_val, rx_val, rdi_val, ping0, pong0, ping1, pong1);
+		if (rx_val) {
+			u32 unmap0 = readl_relaxed(csid->base + 0x120);
+			u32 unmap1 = readl_relaxed(csid->base + 0x124);
+			u32 short0 = readl_relaxed(csid->base + 0x128);
+			u32 long0  = readl_relaxed(csid->base + 0x130);
+			u32 cphy   = readl_relaxed(csid->base + 0x13c);
+			u32 pkts   = readl_relaxed(csid->base + 0x160);
+			dev_info_ratelimited(csid->camss->dev,
+				"csid%d PKT_CAP: unmap0=0x%08x (vc=%u dt=0x%02x wc=%u) long0=0x%08x (vc=%u dt=0x%02x wc=%u) cphy=0x%08x short0=0x%08x pkts=%u\n",
+				csid->id,
+				unmap0, (unmap0 >> 22) & 0x1f, (unmap0 >> 16) & 0x3f, unmap0 & 0xffff,
+				long0,  (long0 >> 22) & 0x1f,  (long0 >> 16) & 0x3f,  long0 & 0xffff,
+				cphy,
+				short0,
+				pkts);
+		}
+	}
 
 	return IRQ_HANDLED;
 }

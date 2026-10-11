@@ -697,10 +697,8 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				return -EINVAL;
 			}
 
-			/* if sensor pixel clock is not available */
-			/* set highest possible VFE clock rate */
-			if (min_rate == 0)
-				j = clock->nfreqs - 1;
+			/* For high-throughput sensors (e.g. 64MP) run VFE at max rate (Turbo 600MHz) */
+			j = clock->nfreqs - 1;
 
 			rate = clk_round_rate(clock->clk, clock->freq[j]);
 			if (rate < 0) {
@@ -714,6 +712,8 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				dev_err(dev, "clk set rate failed: %d\n", ret);
 				return ret;
 			}
+			dev_info(dev, "vfe%d: clock %s set to %ld Hz (requested %u)\n",
+				 vfe->id, clock->name, rate, clock->freq[j]);
 		}
 	}
 
