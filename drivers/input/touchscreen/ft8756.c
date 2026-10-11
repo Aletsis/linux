@@ -109,12 +109,14 @@ static int ft8756_spi_write(void *dev, const void *data, size_t len)
     int ret;
     u32 datalen = len - 1;
     u32 txlen = 0;
-    u8 *txBuf = devm_kzalloc(dev, len + 9, GFP_KERNEL);
-    if (!txBuf)
+    u8 *txBuf = kzalloc(len + 9, GFP_KERNEL);
+    u8 *rxBuf = kzalloc(len + 9, GFP_KERNEL);
+
+    if (!txBuf || !rxBuf) {
+		kfree(txBuf);
+		kfree(rxBuf);
 		return -ENOMEM;
-    u8 *rxBuf = devm_kzalloc(dev, len + 9, GFP_KERNEL);
-    if (!rxBuf)
-		return -ENOMEM;
+    }
 
     txBuf[txlen++] = ((u8*)data)[0];
     txBuf[txlen++] = WRITE_CMD;
@@ -154,6 +156,8 @@ static int ft8756_spi_write(void *dev, const void *data, size_t len)
     }
 
     usleep_range(CS_HIGH_DELAY, CS_HIGH_DELAY + 100);
+    kfree(txBuf);
+    kfree(rxBuf);
 	return ret;
 }
 
@@ -165,14 +169,17 @@ static int ft8756_spi_read(void *dev, const void *reg_buf, size_t reg_size, void
 	struct spi_device *spi = to_spi_device((struct device *)dev);
     int ret, i, j;
     u32 txlen = 0;
-    u8 *txBuf = devm_kzalloc(dev, 4, GFP_KERNEL);
-    if (!txBuf)
-		return -ENOMEM;
-    u8 *rxBuf = devm_kzalloc(dev, val_size + 9, GFP_KERNEL);
-    if (!rxBuf)
-		return -ENOMEM;
+    /* Both buffers span the whole transfer: 4 header + 3 dummy + data + CRC. */
+    u8 *txBuf = kzalloc(val_size + 9, GFP_KERNEL);
+    u8 *rxBuf = kzalloc(val_size + 9, GFP_KERNEL);
     u32 dp = 0;
-    u16 crc = 0xFFFF;
+    u16 crc;
+
+    if (!txBuf || !rxBuf) {
+		kfree(txBuf);
+		kfree(rxBuf);
+		return -ENOMEM;
+    }
 
     txBuf[txlen++] = ((u8*)reg_buf)[0];
     txBuf[txlen++] = READ_CMD;
@@ -201,8 +208,8 @@ static int ft8756_spi_read(void *dev, const void *reg_buf, size_t reg_size, void
             continue;
         }
         if ((rxBuf[3] & 0xA0) == 0) {
-            memcpy(val_buf, &rxBuf[dp], val_size);
             if(txBuf[1] & DATA_CRC_EN) {
+                crc = 0xFFFF;
                 for(j = 0; j < (txlen - dp - 2); j++) {
                     crc ^= rxBuf[dp + j];
                     for(u8 k = 0; k < 8; k++)
@@ -210,20 +217,25 @@ static int ft8756_spi_read(void *dev, const void *reg_buf, size_t reg_size, void
                 }
                 u16 crc_read = (u16) (rxBuf[txlen - 1] << 8) + rxBuf[txlen - 2];
                 if (crc != crc_read) {
-                    dev_err(dev, "crc error: 0x%02x expected, got 0x%02x", crc, crc_read);
+                    dev_dbg(dev, "crc error: 0x%04x expected, got 0x%04x", crc, crc_read);
+                    ret = -EIO;
                     usleep_range(CS_HIGH_DELAY, CS_HIGH_DELAY + 100);
                     continue;
                 }
             }
+            memcpy(val_buf, &rxBuf[dp], val_size);
+            ret = 0;
             break;
         } else {
-            dev_err(dev, "Failed to read data status: 0x%X", rxBuf[3]);
+            dev_dbg(dev, "Failed to read data status: 0x%X", rxBuf[3]);
             ret = -EIO;
             usleep_range(CS_HIGH_DELAY, CS_HIGH_DELAY + 100);
         }
     }
 
     usleep_range(CS_HIGH_DELAY, CS_HIGH_DELAY + 100);
+    kfree(txBuf);
+    kfree(rxBuf);
 	return ret;
 }
 
@@ -501,7 +513,7 @@ static int ft8756_dpram_write(struct ft8756_ts *ts, const u8* fwdata, u32 fwsize
     u16 eccTP, ecc;
     u8 *cmd;
 
-    cmd = devm_kzalloc(ts->dev, packet_size + 7, GFP_KERNEL);
+    cmd = kzalloc(packet_size + 7, GFP_KERNEL);
     if (cmd == NULL) {
 		dev_err(ts->dev, "%s: kzalloc for cmd failed!\n", __func__);
 		return -ENOMEM;
@@ -556,6 +568,7 @@ static int ft8756_dpram_write(struct ft8756_ts *ts, const u8* fwdata, u32 fwsize
     }
 
 exit:
+    kfree(cmd);
     return ret;
 }
 
@@ -640,7 +653,7 @@ upload:
     goto exit;
 
 release_fw:
-	kfree(ts->fw_entry.data);
+	devm_kfree(ts->dev, (void *)ts->fw_entry.data);
 	ts->fw_entry.data = NULL;
 	ts->fw_entry.size = 0;
 exit:
