@@ -406,6 +406,40 @@
 		gpio = <&pm6150l_gpios 6 0>;
 		vin-supply = <&vreg_bob>;
 	};
+
+	wide_avdd1_2p8: regulator-wide-avdd1-2p8 {
+		compatible = "regulator-fixed";
+		regulator-name = "wide_avdd1_2p8";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-enable-ramp-delay = <100>;
+		enable-active-high;
+		gpio = <&pm6150l_gpios 9 0>;
+		vin-supply = <&vreg_bob>;
+	};
+
+	wide_avdd2_1p8: regulator-wide-avdd2-1p8 {
+		compatible = "regulator-fixed";
+		regulator-name = "wide_avdd2_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-enable-ramp-delay = <100>;
+		enable-active-high;
+		gpio = <&pm6150l_gpios 12 0>;
+		vin-supply = <&vreg_l13a_1p8>;
+		regulator-always-on;
+	};
+
+	wide_dvdd_1p2: regulator-wide-dvdd1-1p2 {
+		compatible = "regulator-fixed";
+		regulator-name = "wide_dvdd_1p2";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+		regulator-enable-ramp-delay = <100>;
+		enable-active-high;
+		gpio = <&tlmm 42 0>;
+		vin-supply = <&vreg_s8c_1p3>;
+	};
 };
 
 &camss {
@@ -417,6 +451,21 @@
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		port@0 {
+			csiphy0_ep: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&cam_ov8856_ep>;
+			};
+		};
+
+		port@1 {
+			csiphy1_ep: endpoint {
+				bus-type = <1>;
+				data-lanes = <0 1 2>;
+				remote-endpoint = <&cam_s5kgw1_ep>;
+			};
+		};
 
 		port@2 {
 			csiphy2_ep: endpoint {
@@ -446,8 +495,47 @@
 	status = "okay";
 
 	/* S5KGW1 EEPROM @ 0x51 */
-	/* S5KGW1 dw9800 VCM @ 0xC */
-	/* S5KGW1 @ 0x3D */
+
+	s5kgw1_vcm: camera-lens@c {
+		compatible = "dongwoon,dw9800";
+		reg = <0x0c>;
+
+		vin-supply = <&vreg_l13a_1p8>;
+		vdd-supply = <&wide_afvdd_2p8>;
+	};
+
+	s5kgw1: camera-sensor@3d {
+		compatible = "samsung,s5kgw1";
+		reg = <0x3d>;
+
+		vio-supply = <&vreg_l13a_1p8>;
+		vana-supply = <&wide_avdd1_2p8>;
+		vdig-supply = <&wide_dvdd_1p2>;
+
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		clock-names = "xvclk";
+		clock-frequency = <19200000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 25 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_s5kgw1_default>;
+
+		orientation = <1>;
+		rotation = <90>; /* mounted 180 deg from the other rear sensors */
+
+		lens-focus = <&s5kgw1_vcm>;
+
+		port {
+			cam_s5kgw1_ep: endpoint {
+				bus-type = <1>;
+				data-lanes = <0 1 2>;
+				link-frequencies = /bits/ 64 <400000000 480000000 482000000>;
+				remote-endpoint = <&csiphy1_ep>;
+			};
+		};
+	};
 };
 
 &cci0_i2c1 {
@@ -494,8 +582,36 @@
 		};
 	};
 
-	/* GC8034 EEPROM @ 0x54 */
-	/* GC8034 SENSOR @ 0x37 */
+	ov8856@36 {
+		compatible = "ovti,ov8856";
+		reg = <0x36>;
+
+		dovdd-supply = <&vreg_l13a_1p8>;
+		avdd-supply = <&ultra_avdd_2p8>;
+		dvdd-supply = <&ultra_dvdd_1p2>;
+
+		clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		clock-names = "xvclk";
+		clock-frequency = <19200000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 30 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_ov8856_default>;
+
+		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			cam_ov8856_ep: endpoint {
+				data-lanes = <0 1>;
+				link-frequencies = /bits/ 64
+					<720000000 360000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
 };
 
 &cci1_i2c0 {
@@ -542,6 +658,38 @@
 };
 
 &tlmm {
+	cam_s5kgw1_default: cam-s5kgw1-default-state {
+		rst-pins {
+			pins = "gpio25";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		mclk1-pins {
+			pins = "gpio14";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	cam_ov8856_default: cam-ov8856-default-state {
+		rst-pins {
+			pins = "gpio30";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		mclk4-pins {
+			pins = "gpio23";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
 	cam_s5k5e9_default: cam-s5k5e9-default-state {
 		rst-pins {
 			pins = "gpio24";
