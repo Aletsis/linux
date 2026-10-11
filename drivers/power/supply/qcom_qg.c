@@ -19,6 +19,19 @@
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/unaligned.h>
+#include <linux/workqueue.h>
+
+/* Fixture embeds the exact standalone-tested implementation; not upstream layout. */
+#include <crypto/sha2.h>
+#include <linux/random.h>
+#include "qcom_qg_soc/baseline/experimental_soc.c"
+#include "qcom_qg_soc/soc_recovery.c"
+#include "qcom_qg_soc/soc_integration.c"
+
+static bool experimental_soc;
+module_param(experimental_soc, bool, 0444);
+MODULE_PARM_DESC(experimental_soc,
+		 "Experimental real Full startup and qualified OCV recovery (default disabled)");
 
 #define QG_FIFO_CONTROL_REG		0x51
 #define QG_FIFO_DATA_REG			0x90
@@ -195,7 +208,38 @@ struct qcom_qg_chip {
 	u8 ocv_config[QG_OCV_CONFIG_SIZE];
 	bool ocv_config_valid;
 	bool ocv_notify_pending;
+	struct qg_soc_integration integrated_soc;
+	struct qg_soc_basis soc_basis;
+	u64 soc_debug_state[12];
+	bool soc_debug_initialized;
+	struct delayed_work soc_work;
+	bool soc_paused;
 };
+
+static void qcom_qg_soc_debug(struct qcom_qg_chip *chip)
+{
+	struct qg_soc_integration *state = &chip->integrated_soc;
+	u64 snapshot[] = {
+		state->soc.valid, state->recovery.bound, state->recovery.gap,
+		state->recovery.gap_closed, state->recovery.last_sequence,
+		chip->ocv_sample_sequence, state->soc.design_uah,
+		state->full_soc_milli, state->floor_soc_milli,
+		state->full_table_index, state->last_result, state->error_open,
+	};
+
+	lockdep_assert_held(&chip->fifo_lock);
+	if (chip->soc_debug_initialized &&
+	    !memcmp(chip->soc_debug_state, snapshot, sizeof(snapshot)))
+		return;
+	memcpy(chip->soc_debug_state, snapshot, sizeof(snapshot));
+	chip->soc_debug_initialized = true;
+	dev_dbg(chip->dev,
+		"soc seq=%llu valid=%d bound=%d gap=%d closed=%d window_uah=%d full=%d floor=%d table=%d result=%d\n",
+		chip->ocv_sample_sequence, state->soc.valid, state->recovery.bound,
+		state->recovery.gap, state->recovery.gap_closed, state->soc.design_uah,
+		state->full_soc_milli, state->floor_soc_milli,
+		state->full_table_index, state->last_result);
+}
 
 static void qcom_qg_ocv_invalidate(struct qcom_qg_chip *chip)
 {
@@ -726,10 +770,36 @@ static void qcom_qg_fifo_boundary(struct qcom_qg_chip *chip, u32 flag)
 	trace_qcom_qg_fifo(dev_name(chip->dev), &record);
 }
 
+static void qcom_qg_soc_work(struct work_struct *work);
+
+static void qcom_qg_soc_pause(struct qcom_qg_chip *chip)
+{
+	bool was_valid;
+
+	if (!experimental_soc)
+		return;
+	WRITE_ONCE(chip->soc_paused, true);
+	/* Cancel before taking fifo_lock: worker also takes that lock. */
+	cancel_delayed_work_sync(&chip->soc_work);
+	mutex_lock(&chip->fifo_lock);
+	was_valid = chip->integrated_soc.soc.valid;
+	qg_soc_integration_gap(&chip->integrated_soc, ktime_get_boottime_ns());
+	qcom_qg_soc_debug(chip);
+	mutex_unlock(&chip->fifo_lock);
+	if (was_valid)
+		power_supply_changed(chip->batt_psy);
+}
+
+static void qcom_qg_soc_stop(void *data)
+{
+	qcom_qg_soc_pause(data);
+}
+
 static int qcom_qg_suspend(struct device *dev)
 {
 	struct qcom_qg_chip *chip = dev_get_drvdata(dev);
 
+	qcom_qg_soc_pause(chip);
 	qcom_qg_ocv_irq_disable(chip);
 	mutex_lock(&chip->fifo_lock);
 	chip->ocv_suspended = true;
@@ -754,12 +824,21 @@ static int qcom_qg_resume(struct device *dev)
 	else
 		qcom_qg_ocv_observe(chip, QG_OCV_RESUME);
 	chip->ocv_suspended = false;
+	if (experimental_soc) {
+		qg_soc_integration_resume(&chip->integrated_soc,
+					  ktime_get_boottime_ns());
+		qcom_qg_soc_debug(chip);
+	}
 	/* Re-advertise a cached value hidden from getters during suspension. */
 	if (chip->ocv_valid)
 		chip->ocv_notify_pending = true;
 	mutex_unlock(&chip->fifo_lock);
 	qcom_qg_ocv_irq_enable(chip);
 	qcom_qg_ocv_notify(chip);
+	if (experimental_soc) {
+		WRITE_ONCE(chip->soc_paused, false);
+		schedule_delayed_work(&chip->soc_work, 0);
+	}
 	return 0;
 }
 
@@ -782,6 +861,126 @@ static int qcom_qg_get_current(struct qcom_qg_chip *chip, u8 offset, int *val)
 	*val = -div_s64((s64)temp * chip->current_scale_na, 1000);
 
 	return 0;
+}
+
+static int qcom_qg_soc_current(struct qcom_qg_chip *chip, int *current_ua)
+{
+	u8 raw[2], before, after;
+	u16 value;
+	int ret;
+
+	/* Read-only validity check; STATUS2 is deliberately not read here. */
+	ret = regmap_bulk_read(chip->regmap, chip->base + QG_STATUS1_REG, &before, 1);
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(chip->regmap, chip->base + QG_LAST_ADC_I_DATA0_REG,
+			       raw, sizeof(raw));
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(chip->regmap, chip->base + QG_STATUS1_REG, &after, 1);
+	if (ret)
+		return ret;
+	if ((before & (QG_BATTERY_PRESENT_BIT | QG_OK_BIT)) !=
+	    (QG_BATTERY_PRESENT_BIT | QG_OK_BIT) ||
+	    (after & (QG_BATTERY_PRESENT_BIT | QG_OK_BIT)) !=
+	    (QG_BATTERY_PRESENT_BIT | QG_OK_BIT))
+		return -ENODATA;
+	value = get_unaligned_le16(raw);
+	if (value == QG_FIFO_RESET_VALUE)
+		return -ENODATA;
+	*current_ua = -div_s64((s64)(s16)value * chip->current_scale_na, 1000);
+	return 0;
+}
+
+#include "qcom_qg_soc/soc_profile.c"
+
+static void qcom_qg_soc_work(struct work_struct *work)
+{
+	struct qcom_qg_chip *chip = container_of(to_delayed_work(work),
+					      struct qcom_qg_chip, soc_work);
+	struct qg_soc_observation observation = {};
+	union power_supply_propval status = {}, online = {};
+	union power_supply_propval status_before = {}, online_before = {};
+	union power_supply_propval health = {}, health_before = {};
+	int ret_health, ret_health_before;
+	int ret_status_before, ret_online_before, ret_temp, temp_mc = 0;
+	int old_capacity, capacity, ret_current, ret_status, ret_online, ret_guard;
+	bool observed;
+
+	mutex_lock(&chip->fifo_lock);
+	if (READ_ONCE(chip->soc_paused) || chip->ocv_stopping || chip->ocv_suspended) {
+		mutex_unlock(&chip->fifo_lock);
+		return;
+	}
+	old_capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+	ret_status_before = power_supply_get_property_from_supplier(chip->batt_psy,
+								    POWER_SUPPLY_PROP_STATUS,
+								    &status_before);
+	ret_online_before = power_supply_get_property_from_supplier(chip->batt_psy,
+								    POWER_SUPPLY_PROP_ONLINE,
+								    &online_before);
+	ret_health_before = power_supply_get_property_from_supplier(chip->batt_psy,
+								    POWER_SUPPLY_PROP_HEALTH,
+								    &health_before);
+	ret_current = qcom_qg_soc_current(chip, &observation.current_ua);
+	ret_temp = iio_read_channel_processed(chip->batt_therm_chan, &temp_mc);
+	ret_guard = qcom_qg_ocv_guard(chip, QG_OCV_GETTER, false);
+	ret_status = power_supply_get_property_from_supplier(chip->batt_psy,
+							     POWER_SUPPLY_PROP_STATUS, &status);
+	ret_online = power_supply_get_property_from_supplier(chip->batt_psy,
+							     POWER_SUPPLY_PROP_ONLINE, &online);
+	ret_health = power_supply_get_property_from_supplier(chip->batt_psy,
+							     POWER_SUPPLY_PROP_HEALTH, &health);
+	/* Acquisition-end timestamp. Polling is a sampled environmental assumption. */
+	observation.environment.time_ns = ktime_get_boottime_ns();
+	observed = !ret_current && !ret_status && !ret_online && !ret_guard &&
+		!ret_health && !ret_health_before &&
+		health.intval == POWER_SUPPLY_HEALTH_GOOD &&
+		health_before.intval == POWER_SUPPLY_HEALTH_GOOD &&
+		!ret_status_before && !ret_online_before &&
+		status.intval == status_before.intval &&
+		online.intval == online_before.intval &&
+		status.intval > POWER_SUPPLY_STATUS_UNKNOWN &&
+		status.intval <= POWER_SUPPLY_STATUS_FULL &&
+		(online.intval == 0 || online.intval == 1);
+	observation.observed = observed;
+	observation.basis = chip->soc_basis;
+	memcpy(observation.basis.controls, chip->ocv_config, QG_OCV_CONFIG_SIZE);
+	observation.sequence = chip->ocv_sample_sequence;
+	observation.begin_ns = chip->ocv_sample_begin_ns;
+	observation.end_ns = chip->ocv_sample_end_ns;
+	observation.ocv_valid = chip->ocv_valid && chip->ocv_config_valid;
+	observation.environment.table_index = ret_temp < 0 ? -1 :
+		qcom_qg_soc_table(chip, temp_mc);
+	if (observed && status.intval == POWER_SUPPLY_STATUS_FULL &&
+	    online.intval && observation.current_ua == 0)
+		observation.environment.phase = 1;
+	else if (observed && status.intval == POWER_SUPPLY_STATUS_DISCHARGING &&
+		 !online.intval && observation.current_ua <= 0)
+		observation.environment.phase = 2;
+	observation.environment.valid = observed && ret_temp >= 0 &&
+		observation.environment.table_index >= 0 && observation.environment.phase;
+	/* Sampled environment is independent of the old cached OCV current. */
+	if ((observation.environment.phase == 1 && chip->ocv_current_ua) ||
+	    (observation.environment.phase == 2 && chip->ocv_current_ua > 0))
+		observation.ocv_valid = false;
+	observation.ocv_soc_milli =
+		qcom_qg_soc_lookup(chip, observation.environment.table_index,
+				   chip->ocv_voltage_uv);
+	observation.floor_voltage_uv = chip->batt_info->voltage_min_design_uv;
+	observation.floor_soc_milli =
+		qcom_qg_soc_lookup(chip, observation.environment.table_index,
+				   observation.floor_voltage_uv);
+	if (observation.ocv_soc_milli < 0 || observation.floor_soc_milli < 0)
+		observation.ocv_valid = false;
+	qg_soc_integration_sample(&chip->integrated_soc, &observation);
+	qcom_qg_soc_debug(chip);
+	capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+	mutex_unlock(&chip->fifo_lock);
+	if (capacity != old_capacity)
+		power_supply_changed(chip->batt_psy);
+	if (!READ_ONCE(chip->soc_paused))
+		schedule_delayed_work(&chip->soc_work, msecs_to_jiffies(5000));
 }
 
 static int qcom_qg_get_voltage(struct qcom_qg_chip *chip, u8 offset, int *val)
@@ -820,9 +1019,21 @@ static void qcom_qg_external_power_changed(struct power_supply *psy)
 
 static int qcom_qg_get_capacity(struct qcom_qg_chip *chip, int *val)
 {
-	int ret, voltage_now, temp = 25;
+	int ret, voltage_now;
 	int voltage_min = chip->batt_info->voltage_min_design_uv;
 	int voltage_max = chip->batt_info->voltage_max_design_uv;
+
+	if (experimental_soc) {
+		mutex_lock(&chip->fifo_lock);
+		ret = READ_ONCE(chip->soc_paused) ? -1 :
+			qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+		mutex_unlock(&chip->fifo_lock);
+		if (ret >= 0) {
+			*val = ret;
+			return 0;
+		}
+		/* Unknown estimate keeps the existing ABI path; never synthesize 0. */
+	}
 
 	ret = qcom_qg_get_voltage(chip, QG_S2_NORMAL_AVG_V_DATA0_REG,
 				  &voltage_now);
@@ -831,21 +1042,7 @@ static int qcom_qg_get_capacity(struct qcom_qg_chip *chip, int *val)
 		return ret;
 	}
 
-	if (chip->batt_therm_chan) {
-		int temp_mc;
-
-		ret = iio_read_channel_processed(chip->batt_therm_chan, &temp_mc);
-		if (ret >= 0)
-			temp = temp_mc / 1000;
-	}
-
-	/* Try OCV lookup table if provided by monitored-battery DT */
-	ret = power_supply_batinfo_ocv2cap(chip->batt_info, voltage_now, temp);
-	if (ret >= 0) {
-		*val = clamp(ret, 0, 100);
-		return 0;
-	}
-
+	/* S2 loaded voltage is not OCV: keep the previous linear ABI fallback. */
 	/* Fallback to simple voltage-linear estimation */
 	if (voltage_now <= voltage_min)
 		*val = 0;
@@ -981,6 +1178,8 @@ static int qcom_qg_probe(struct platform_device *pdev)
 
 	chip->dev = &pdev->dev;
 	mutex_init(&chip->fifo_lock);
+	INIT_DELAYED_WORK(&chip->soc_work, qcom_qg_soc_work);
+	chip->soc_paused = true;
 	chip->fifo_epoch_ns = ktime_get_boottime_ns();
 
 	/* Regmap */
@@ -1042,6 +1241,18 @@ static int qcom_qg_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, ret,
 				     "Failed to get battery info\n");
 
+	if (experimental_soc && chip->batt_info->charge_full_design_uah <= 0)
+		return dev_err_probe(chip->dev, -EINVAL, "Invalid design capacity\n");
+	qg_soc_integration_init(&chip->integrated_soc,
+				chip->batt_info->charge_full_design_uah);
+	if (experimental_soc) {
+		ret = qcom_qg_soc_profile_init(chip);
+		if (ret)
+			return dev_err_probe(chip->dev, ret, "Invalid experimental OCV scenario\n");
+		/* Per-instance cookie, not the userspace boot UUID. */
+		get_random_bytes(chip->soc_basis.boot_id, sizeof(chip->soc_basis.boot_id));
+		chip->soc_basis.driver_epoch_ms = div_u64(chip->fifo_epoch_ns, NSEC_PER_MSEC);
+	}
 	platform_set_drvdata(pdev, chip);
 	irq = platform_get_irq_byname_optional(pdev, "fifo-done");
 	if (irq > 0) {
@@ -1054,7 +1265,15 @@ static int qcom_qg_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, irq ?: -EINVAL, "Failed to get FIFO IRQ\n");
 	}
 
-	return qcom_qg_ocv_init(pdev, chip);
+	ret = qcom_qg_ocv_init(pdev, chip);
+	if (ret || !experimental_soc)
+		return ret;
+	ret = devm_add_action_or_reset(chip->dev, qcom_qg_soc_stop, chip);
+	if (ret)
+		return ret;
+	WRITE_ONCE(chip->soc_paused, false);
+	schedule_delayed_work(&chip->soc_work, 0);
+	return 0;
 }
 
 static const struct of_device_id qcom_qg_of_match[] = {
