@@ -503,10 +503,13 @@ static int wcd937x_codec_ear_dac_event(struct snd_soc_dapm_widget *w,
 			snd_soc_component_update_bits(component,
 						      WCD937X_HPH_NEW_INT_RDAC_HD2_CTL_L,
 						      0x0f, 0x06);
-		if (wcd937x->comp1_enable)
-			snd_soc_component_update_bits(component,
-						      WCD937X_DIGITAL_CDC_COMP_CTL_0,
-						      BIT(1), BIT(1));
+		/*
+		 * Match the downstream driver, which sets the HPHL compander
+		 * bit for the EAR DAC regardless of the compander switch.
+		 */
+		snd_soc_component_update_bits(component,
+					      WCD937X_DIGITAL_CDC_COMP_CTL_0,
+					      BIT(1), BIT(1));
 		usleep_range(5000, 5010);
 
 		snd_soc_component_update_bits(component, WCD937X_FLYBACK_EN, BIT(2), 0x00);
@@ -522,7 +525,7 @@ static int wcd937x_codec_ear_dac_event(struct snd_soc_dapm_widget *w,
 			snd_soc_component_update_bits(component,
 						      WCD937X_HPH_NEW_INT_RDAC_HD2_CTL_L,
 						      0x0f, BIT(0));
-		if (wcd937x->comp1_enable)
+		if (!wcd937x->comp1_enable)
 			snd_soc_component_update_bits(component,
 						      WCD937X_DIGITAL_CDC_COMP_CTL_0,
 						      BIT(1), 0x00);
