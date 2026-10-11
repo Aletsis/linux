@@ -718,6 +718,15 @@ config VIDEO_S5KGM2
 	  To compile this driver as a module, choose M here: the
 	  module will be called s5kgm2.
 
+config VIDEO_S5KGW1
+	tristate "Samsung S5KGW1 sensor support"
+	help
+	  This is a V4L2 sensor driver for Samsung S5KGW1 raw
+	  camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgw1.
+
 config VIDEO_VGXY61
 	tristate "ST VGXY61 sensor support"
 	select V4L2_CCI_I2C
