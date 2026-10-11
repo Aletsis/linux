@@ -30,6 +30,8 @@ struct qg_soc_integration {
 	qg_soc_u64 gap_end_ns;
 	int nominal_uah, full_soc_milli, floor_soc_milli, floor_voltage_uv;
 	int full_table_index;
+	/* nominal_uah is a measured Full-to-cutoff capacity, not the design one. */
+	bool nominal_measured;
 	bool error_open;
 	enum qg_soc_recovery_result last_result;
 };
