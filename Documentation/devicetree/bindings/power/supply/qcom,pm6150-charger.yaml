@@ -22,7 +22,7 @@ properties:
 
   interrupts:
     minItems: 1
-    maxItems: 4
+    maxItems: 7
 
   interrupt-names:
     minItems: 1
@@ -31,6 +31,9 @@ properties:
       - const: usbin-icl-change
       - const: bat-ov
       - const: wdog-bark
+      - const: chg-state-change
+      - const: usbin-src-change
+      - const: bat-temp
 
   io-channels:
     minItems: 1
@@ -61,6 +64,7 @@ properties:
 required:
   - compatible
   - reg
+  - monitored-battery
 
 allOf:
   - $ref: power-supply.yaml#
@@ -80,11 +84,15 @@ examples:
         reg = <0x1000>;
 
         interrupts = <0x0 0x13 0x04 IRQ_TYPE_EDGE_BOTH>,
-                     <0x0 0x13 0x06 IRQ_TYPE_EDGE_RISING>,
+                     <0x0 0x13 0x07 IRQ_TYPE_EDGE_RISING>,
                      <0x0 0x12 0x02 IRQ_TYPE_EDGE_BOTH>,
-                     <0x0 0x16 0x01 IRQ_TYPE_EDGE_RISING>;
+                     <0x0 0x16 0x01 IRQ_TYPE_EDGE_RISING>,
+                     <0x0 0x10 0x01 IRQ_TYPE_EDGE_RISING>,
+                     <0x0 0x13 0x06 IRQ_TYPE_EDGE_RISING>,
+                     <0x0 0x12 0x00 IRQ_TYPE_EDGE_RISING>;
         interrupt-names = "usb-plugin", "usbin-icl-change",
-                          "bat-ov", "wdog-bark";
+                          "bat-ov", "wdog-bark",
+                          "chg-state-change", "usbin-src-change", "bat-temp";
 
         io-channels = <&pm6150_adc 7>,
                       <&pm6150_adc 8>;
