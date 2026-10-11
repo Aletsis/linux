@@ -18,6 +18,7 @@
 #include <linux/pm.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/rtc.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
@@ -171,6 +172,20 @@ struct qcom_qg_ocv_record {
 /* SRAM offsets */
 #define QG_SDAM_LEARNED_CAPACITY_OFFSET	0x68 /* 2-byte 0x68-0x69 */
 
+/* Shutdown-SOC record, same layout as the vendor qpnp-qg driver (qg-reg.h). */
+#define QG_SDAM_VALID_OFFSET		0x46 /* 1-byte */
+#define QG_SDAM_SOC_OFFSET		0x47 /* 1-byte, percent */
+#define QG_SDAM_TEMP_OFFSET		0x48 /* 2-byte, decidegC */
+#define QG_SDAM_OCV_OFFSET		0x4c /* 4-byte, uV */
+#define QG_SDAM_IBAT_OFFSET		0x50 /* 4-byte, uA, positive discharging */
+#define QG_SDAM_TIME_OFFSET		0x54 /* 4-byte, RTC seconds */
+#define QG_SDAM_SOC_RECORD_SIZE		(QG_SDAM_TIME_OFFSET + 4 - QG_SDAM_VALID_OFFSET)
+
+#define QG_SOC_SAVE_PERIOD_S		30
+/* Restore only across a reboot/module reload/short gap, never a long off. */
+#define QG_SOC_RESTORE_MAX_AGE_S	600
+#define QG_SOC_RESTORE_MAX_TEMP_DIFF	50 /* decidegC, vendor default */
+
 struct qcom_qg_chip {
 	struct device *dev;
 	struct regmap *regmap;
@@ -214,6 +229,10 @@ struct qcom_qg_chip {
 	bool soc_debug_initialized;
 	struct delayed_work soc_work;
 	bool soc_paused;
+	/* What we last wrote to the SDAM shutdown-SOC record. */
+	bool soc_saved_valid;
+	bool soc_saved_cleared;
+	u32 soc_saved_time;
 };
 
 static void qcom_qg_soc_debug(struct qcom_qg_chip *chip)
@@ -772,6 +791,144 @@ static void qcom_qg_fifo_boundary(struct qcom_qg_chip *chip, u32 flag)
 
 static void qcom_qg_soc_work(struct work_struct *work);
 
+static int qcom_qg_get_current(struct qcom_qg_chip *chip, u8 offset, int *val);
+static int qcom_qg_get_voltage(struct qcom_qg_chip *chip, u8 offset, int *val);
+
+static int qcom_qg_rtc_seconds(u32 *seconds)
+{
+	struct rtc_device *rtc;
+	struct rtc_time tm;
+	int ret;
+
+	/* The PMIC RTC keeps counting while the phone is off. */
+	rtc = rtc_class_open("rtc0");
+	if (!rtc)
+		return -ENODEV;
+	ret = rtc_read_time(rtc, &tm);
+	rtc_class_close(rtc);
+	if (ret)
+		return ret;
+	*seconds = (u32)rtc_tm_to_time64(&tm);
+	return 0;
+}
+
+static int qcom_qg_sdam_write(struct qcom_qg_chip *chip, unsigned int offset,
+			      const void *buf, size_t len)
+{
+	int ret = nvmem_device_write(chip->sdam, offset, len, (void *)buf);
+
+	if (ret < 0)
+		return ret;
+	return ret == len ? 0 : -EIO;
+}
+
+static void qcom_qg_soc_clear_saved(struct qcom_qg_chip *chip)
+{
+	u8 valid = 0;
+
+	lockdep_assert_held(&chip->fifo_lock);
+	if (chip->soc_saved_cleared)
+		return;
+	if (!qcom_qg_sdam_write(chip, QG_SDAM_VALID_OFFSET, &valid, 1)) {
+		chip->soc_saved_valid = false;
+		chip->soc_saved_cleared = true;
+	}
+}
+
+/* Persist the integrated SOC so a reboot does not drop to the fallback. */
+static void qcom_qg_soc_save(struct qcom_qg_chip *chip, int temp_dc, bool force)
+{
+	int capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+	int voltage_uv, current_ua;
+	u8 valid = 0, soc;
+	__le16 temp;
+	__le32 word;
+	u32 now;
+
+	lockdep_assert_held(&chip->fifo_lock);
+	if (capacity < 0 || capacity > 100 || qcom_qg_rtc_seconds(&now))
+		return;
+	if (!force && chip->soc_saved_valid &&
+	    now - chip->soc_saved_time < QG_SOC_SAVE_PERIOD_S)
+		return;
+	if (qcom_qg_get_voltage(chip, QG_S2_NORMAL_AVG_V_DATA0_REG, &voltage_uv) ||
+	    qcom_qg_get_current(chip, QG_S2_NORMAL_AVG_I_DATA0_REG, &current_ua))
+		return;
+
+	/* Invalidate first so a torn record is never trusted. */
+	if (qcom_qg_sdam_write(chip, QG_SDAM_VALID_OFFSET, &valid, 1))
+		return;
+	chip->soc_saved_valid = false;
+	soc = capacity;
+	temp = cpu_to_le16((s16)temp_dc);
+	if (qcom_qg_sdam_write(chip, QG_SDAM_SOC_OFFSET, &soc, 1) ||
+	    qcom_qg_sdam_write(chip, QG_SDAM_TEMP_OFFSET, &temp, 2))
+		return;
+	word = cpu_to_le32(voltage_uv);
+	if (qcom_qg_sdam_write(chip, QG_SDAM_OCV_OFFSET, &word, 4))
+		return;
+	word = cpu_to_le32(-current_ua);
+	if (qcom_qg_sdam_write(chip, QG_SDAM_IBAT_OFFSET, &word, 4))
+		return;
+	word = cpu_to_le32(now);
+	if (qcom_qg_sdam_write(chip, QG_SDAM_TIME_OFFSET, &word, 4))
+		return;
+	valid = 1;
+	if (qcom_qg_sdam_write(chip, QG_SDAM_VALID_OFFSET, &valid, 1))
+		return;
+	chip->soc_saved_valid = true;
+	chip->soc_saved_cleared = false;
+	chip->soc_saved_time = now;
+}
+
+/*
+ * Seed the coulomb counter from the SDAM record. Returns 1 when restored,
+ * 0 when the record is unusable (caller may clear it) and a negative errno
+ * when it cannot be judged yet (e.g. the RTC driver is not bound).
+ */
+static int qcom_qg_soc_restore(struct qcom_qg_chip *chip, int temp_dc,
+			       u64 sample_ns)
+{
+	struct qg_experimental_soc *soc = &chip->integrated_soc.soc;
+	u8 record[QG_SDAM_SOC_RECORD_SIZE];
+	int saved_soc, saved_temp, design;
+	u32 now, saved_time;
+	int ret;
+
+	lockdep_assert_held(&chip->fifo_lock);
+	ret = qcom_qg_rtc_seconds(&now);
+	if (ret)
+		return ret;
+	ret = nvmem_device_read(chip->sdam, QG_SDAM_VALID_OFFSET, sizeof(record),
+				record);
+	if (ret < 0)
+		return ret;
+	if (ret != sizeof(record))
+		return -EIO;
+
+	saved_soc = record[QG_SDAM_SOC_OFFSET - QG_SDAM_VALID_OFFSET];
+	saved_temp = (s16)get_unaligned_le16(record + QG_SDAM_TEMP_OFFSET -
+					     QG_SDAM_VALID_OFFSET);
+	saved_time = get_unaligned_le32(record + QG_SDAM_TIME_OFFSET -
+					QG_SDAM_VALID_OFFSET);
+	if (record[0] != 1 || saved_soc > 100 || now < saved_time ||
+	    now - saved_time > QG_SOC_RESTORE_MAX_AGE_S ||
+	    abs(saved_temp - temp_dc) > QG_SOC_RESTORE_MAX_TEMP_DIFF)
+		return 0;
+
+	design = soc->design_uah > 0 ? soc->design_uah :
+		chip->integrated_soc.nominal_uah;
+	qg_experimental_soc_init(soc, design);
+	soc->relative_uah = div_s64((s64)design * (saved_soc - 100), 100);
+	/* Integrate from just before this sample; the gap check needs a time. */
+	soc->last_ms = div_u64(sample_ns, NSEC_PER_MSEC) - 1;
+	soc->have_time = true;
+	soc->valid = true;
+	dev_info(chip->dev, "restored SOC %d%% saved %us ago\n", saved_soc,
+		 now - saved_time);
+	return 1;
+}
+
 static void qcom_qg_soc_pause(struct qcom_qg_chip *chip)
 {
 	bool was_valid;
@@ -783,6 +940,12 @@ static void qcom_qg_soc_pause(struct qcom_qg_chip *chip)
 	cancel_delayed_work_sync(&chip->soc_work);
 	mutex_lock(&chip->fifo_lock);
 	was_valid = chip->integrated_soc.soc.valid;
+	if (was_valid) {
+		int temp_mc;
+
+		if (!iio_read_channel_processed(chip->batt_therm_chan, &temp_mc))
+			qcom_qg_soc_save(chip, temp_mc / 100, true);
+	}
 	qg_soc_integration_gap(&chip->integrated_soc, ktime_get_boottime_ns());
 	qcom_qg_soc_debug(chip);
 	mutex_unlock(&chip->fifo_lock);
@@ -973,7 +1136,14 @@ static void qcom_qg_soc_work(struct work_struct *work)
 				   observation.floor_voltage_uv);
 	if (observation.ocv_soc_milli < 0 || observation.floor_soc_milli < 0)
 		observation.ocv_valid = false;
+	if (observed && ret_temp >= 0 && !chip->integrated_soc.soc.valid &&
+	    observation.environment.phase != 1 &&
+	    !qcom_qg_soc_restore(chip, temp_mc / 100,
+				 observation.environment.time_ns))
+		qcom_qg_soc_clear_saved(chip);
 	qg_soc_integration_sample(&chip->integrated_soc, &observation);
+	if (ret_temp >= 0 && chip->integrated_soc.soc.valid)
+		qcom_qg_soc_save(chip, temp_mc / 100, false);
 	qcom_qg_soc_debug(chip);
 	capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
 	mutex_unlock(&chip->fifo_lock);
@@ -1276,6 +1446,15 @@ static int qcom_qg_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static void qcom_qg_shutdown(struct platform_device *pdev)
+{
+	struct qcom_qg_chip *chip = platform_get_drvdata(pdev);
+
+	/* Saves the shutdown-SOC record before reboot/poweroff. */
+	if (chip)
+		qcom_qg_soc_pause(chip);
+}
+
 static const struct of_device_id qcom_qg_of_match[] = {
 	{ .compatible = "qcom,pm6150-qg", },
 	{ /* sentinel */ },
@@ -1289,6 +1468,7 @@ static struct platform_driver qcom_qg_driver = {
 		.pm = pm_sleep_ptr(&qcom_qg_pm_ops),
 	},
 	.probe = qcom_qg_probe,
+	.shutdown = qcom_qg_shutdown,
 };
 
 module_platform_driver(qcom_qg_driver);
