@@ -583,7 +583,17 @@ static int csid_set_clock_rates(struct csid_device *csid)
 				return ret;
 			}
 		} else if (clock->nfreqs) {
-			clk_set_rate(clock->clk, clock->freq[0]);
+			/*
+			 * cphy_rx_src is shared with the CSIPHYs and carries the PHY
+			 * data into the CSID. Its lowest rate (150 MHz on SC7180)
+			 * loses data from fast C-PHY sensors (stream underflow);
+			 * downstream never runs it below svs (270 MHz). Use the
+			 * highest rate for it and keep the old behaviour otherwise.
+			 */
+			if (strstr(clock->name, "cphy_rx"))
+				clk_set_rate(clock->clk, clock->freq[clock->nfreqs - 1]);
+			else
+				clk_set_rate(clock->clk, clock->freq[0]);
 		}
 	}
 
