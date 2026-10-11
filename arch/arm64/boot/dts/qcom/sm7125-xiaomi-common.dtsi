@@ -173,6 +173,7 @@
 		vreg_s5a_2p0: smps5 {
 			regulator-min-microvolt = <1744000>;
 			regulator-max-microvolt = <2040000>;
+			regulator-always-on;
 		};
 
 		vreg_l1a_1p2: ldo1 {
@@ -294,6 +295,7 @@
 		vreg_s8c_1p3: smps8 {
 			regulator-min-microvolt = <1120000>;
 			regulator-max-microvolt = <1408000>;
+			regulator-always-on;
 		};
 
 		vreg_l1c_1p8: ldo1 {
