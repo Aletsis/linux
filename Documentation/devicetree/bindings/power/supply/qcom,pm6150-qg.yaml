@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/qcom,pm6150-qg.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm PM6150 QGauge
+
+maintainers:
+  - Alexis Barron Luna <alexis.barron.luna@gmail.com>
+
+description:
+  Battery voltage and current measurement peripheral of PM6150. Battery
+  temperature is measured through the PMIC ADC. SDAM holds saved gauge data.
+  The charger supplies the battery and provides its charging status.
+
+allOf:
+  - $ref: power-supply.yaml#
+  - if:
+      properties:
+        interrupts:
+          minItems: 2
+      required:
+        - interrupts
+    then:
+      properties:
+        interrupt-names:
+          minItems: 2
+    else:
+      properties:
+        interrupt-names:
+          maxItems: 1
+
+properties:
+  compatible:
+    const: qcom,pm6150-qg
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    minItems: 1
+    items:
+      - description: FIFO sample batch ready
+      - description: Qualified open-circuit voltage available
+
+  interrupt-names:
+    minItems: 1
+    items:
+      - const: fifo-done
+      - const: good-ocv
+
+  io-channels:
+    minItems: 1
+    maxItems: 2
+
+  io-channel-names:
+    minItems: 1
+    items:
+      - const: batt-therm
+      - const: batt-id
+
+  nvmem:
+    maxItems: 1
+
+  monitored-battery: true
+
+  power-supplies:
+    maxItems: 1
+    description: Charger supplying the monitored battery.
+
+required:
+  - compatible
+  - reg
+  - io-channels
+  - io-channel-names
+  - nvmem
+  - monitored-battery
+
+additionalProperties: false
+
+dependentRequired:
+  interrupts: [interrupt-names]
+  interrupt-names: [interrupts]
+
+examples:
+  - |
+    pmic {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        battery@4800 {
+            compatible = "qcom,pm6150-qg";
+            reg = <0x4800>;
+            interrupts = <0 0x48 3 1>, <0 0x48 4 1>;
+            interrupt-names = "fifo-done", "good-ocv";
+            io-channels = <&pm6150_adc 0x4a>, <&pm6150_adc 0x4b>;
+            io-channel-names = "batt-therm", "batt-id";
+            nvmem = <&pm6150_qg_sdam>;
+            monitored-battery = <&battery>;
+            power-supplies = <&pm6150_charger>;
+        };
+    };
