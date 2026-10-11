@@ -909,16 +909,7 @@ static int ov16a1q_get_selection(struct v4l2_subdev *sd,
 
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP:
-		sel->r = *v4l2_subdev_state_get_crop(sd_state, sel->pad);
-		return 0;
-
 	case V4L2_SEL_TGT_NATIVE_SIZE:
-		sel->r.top = 0;
-		sel->r.left = 0;
-		sel->r.width = ov16a1q->cur_mode->width;
-		sel->r.height = ov16a1q->cur_mode->height;
-		return 0;
-
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 		sel->r.top = 0;
@@ -1149,7 +1140,7 @@ static int ov16a1q_init_ctrls(struct ov16a1q *ov16a1q)
 	exposure_max = mode->vts - 4;
 	ov16a1q->exposure = v4l2_ctrl_new_std(handler, &ov16a1q_ctrl_ops,
 						 V4L2_CID_EXPOSURE,
-						 0,
+						 1,
 						 exposure_max, 1,
 						 exposure_max);
 

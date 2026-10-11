@@ -1476,7 +1476,7 @@ static const struct ov8856_lane_cfg lane_cfg_2 = {
 			.regs = mipi_data_rate_lane_2.regs_1,
 		}
 	}},
-	{/*{
+	{{
 		.width = 3280,
 		.height = 2464,
 		.hts = 1928,
@@ -1490,7 +1490,7 @@ static const struct ov8856_lane_cfg lane_cfg_2 = {
 		.link_freq_index = 0,
 		.data_lanes = 2,
 		.default_mbus_index = OV8856_MEDIA_BUS_FMT_SGRBG10_1X10,
-	},*/
+	},
 	{
 		.width = 1640,
 		.height = 1232,
@@ -2244,6 +2244,35 @@ static int ov8856_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	return 0;
 }
 
+static int ov8856_get_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *sd_state,
+				struct v4l2_subdev_selection *sel)
+{
+	struct ov8856 *ov8856 = to_ov8856(sd);
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+		mutex_lock(&ov8856->mutex);
+		sel->r.top = 0;
+		sel->r.left = 0;
+		sel->r.width = ov8856->cur_mode->width;
+		sel->r.height = ov8856->cur_mode->height;
+		mutex_unlock(&ov8856->mutex);
+		return 0;
+
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+		sel->r.top = 0;
+		sel->r.left = 0;
+		sel->r.width = 3280;
+		sel->r.height = 2464;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
 static const struct v4l2_subdev_video_ops ov8856_video_ops = {
 	.s_stream = ov8856_set_stream,
 };
@@ -2253,6 +2282,7 @@ static const struct v4l2_subdev_pad_ops ov8856_pad_ops = {
 	.get_fmt = ov8856_get_format,
 	.enum_mbus_code = ov8856_enum_mbus_code,
 	.enum_frame_size = ov8856_enum_frame_size,
+	.get_selection = ov8856_get_selection,
 };
 
 static const struct v4l2_subdev_ops ov8856_subdev_ops = {
