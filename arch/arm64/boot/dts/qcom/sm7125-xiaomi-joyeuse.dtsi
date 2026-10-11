@@ -8,6 +8,23 @@
 
 #include "sm7125-xiaomi-common.dtsi"
 
+&battery {
+	/* Normal SMB5 termination; distinct from QGauge's 350 mA threshold. */
+	charge-term-current-microamp = <200000>;
+};
+
+&pm6150_typec {
+	connector {
+		/* Higher voltages require coordinated SMB5 input configuration. */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+				      PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>;
+	};
+};
+
+&pm6150_qgauge {
+	power-supplies = <&pm6150_charger>;
+};
+
 / {
 	compatible = "xiaomi,miatoll", "xiaomi,joyeuse", "qcom,sm7125";
 	/* required for bootloader to select correct board */
