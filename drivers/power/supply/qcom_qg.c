@@ -34,6 +34,12 @@ module_param(experimental_soc, bool, 0444);
 MODULE_PARM_DESC(experimental_soc,
 		 "Experimental real Full startup and qualified OCV recovery (default disabled)");
 
+/* Same cutoff as the vendor DT (qcom,vbatt-cutoff-mv = <3200>). */
+static int empty_voltage_uv = 3200000;
+module_param(empty_voltage_uv, int, 0644);
+MODULE_PARM_DESC(empty_voltage_uv,
+		 "Average battery voltage below which a discharging battery is reported empty");
+
 #define QG_FIFO_CONTROL_REG		0x51
 #define QG_FIFO_DATA_REG			0x90
 #define QG_FIFO_MAX_SAMPLES		8
@@ -186,6 +192,13 @@ struct qcom_qg_ocv_record {
 #define QG_SOC_RESTORE_MAX_AGE_S	600
 #define QG_SOC_RESTORE_MAX_TEMP_DIFF	50 /* decidegC, vendor default */
 
+/* 6 consecutive 5 s samples below the cutoff before declaring empty. */
+#define QG_SOC_EMPTY_SAMPLES		6
+#define QG_SOC_EMPTY_MIN_PLAUSIBLE_UV	2000000
+/* Learn capacity only from a moderate load; a heavy one sags too early. */
+#define QG_SOC_LEARN_MAX_CURRENT_UA	500000
+#define QG_SOC_LEARN_MIN_PERCENT	30
+
 struct qcom_qg_chip {
 	struct device *dev;
 	struct regmap *regmap;
@@ -233,6 +246,9 @@ struct qcom_qg_chip {
 	bool soc_saved_valid;
 	bool soc_saved_cleared;
 	u32 soc_saved_time;
+	/* Voltage-based empty detection. */
+	unsigned int soc_empty_count;
+	bool soc_empty_latched;
 };
 
 static void qcom_qg_soc_debug(struct qcom_qg_chip *chip)
@@ -881,6 +897,93 @@ static void qcom_qg_soc_save(struct qcom_qg_chip *chip, int temp_dc, bool force)
 	chip->soc_saved_time = now;
 }
 
+/* Use the capacity learned in SDAM (vendor layout, mAh) when it is sane. */
+static int qcom_qg_learned_capacity_uah(struct qcom_qg_chip *chip)
+{
+	int design = chip->batt_info->charge_full_design_uah;
+	u8 raw[2];
+	int uah;
+
+	if (nvmem_device_read(chip->sdam, QG_SDAM_LEARNED_CAPACITY_OFFSET,
+			      sizeof(raw), raw) != sizeof(raw))
+		return design;
+	uah = get_unaligned_le16(raw) * 1000;
+	if (uah < design / 100 * QG_SOC_LEARN_MIN_PERCENT || uah > design)
+		return design;
+	return uah;
+}
+
+static void qcom_qg_soc_seed(struct qg_experimental_soc *soc, int design_uah,
+			     s64 relative_uah, u64 sample_ns)
+{
+	qg_experimental_soc_init(soc, design_uah);
+	soc->relative_uah = relative_uah;
+	/* Integrate from just before this sample; the gap check needs a time. */
+	soc->last_ms = div_u64(sample_ns, NSEC_PER_MSEC) - 1;
+	soc->have_time = true;
+	soc->valid = true;
+}
+
+/*
+ * The PMIC cuts power near 2.8 V with no warning. Report an empty battery
+ * once the averaged voltage stays below the cutoff while discharging, so
+ * userspace powers off cleanly, and remember how much charge the battery
+ * really delivered since Full as the learned capacity.
+ */
+static void qcom_qg_soc_empty_check(struct qcom_qg_chip *chip, bool discharging,
+				    u64 sample_ns)
+{
+	struct qg_soc_integration *state = &chip->integrated_soc;
+	struct qg_experimental_soc *soc = &state->soc;
+	int design = chip->batt_info->charge_full_design_uah;
+	int voltage_uv, last_uv, current_ua, delivered, capacity = state->nominal_uah;
+	__le16 raw;
+
+	lockdep_assert_held(&chip->fifo_lock);
+	if (!discharging) {
+		chip->soc_empty_count = 0;
+		chip->soc_empty_latched = false;
+		return;
+	}
+	/*
+	 * Both the averaged and the last sample must be below the cutoff, and
+	 * the average must be a plausible battery voltage: a register that is
+	 * not populated yet must never power the phone off.
+	 */
+	if (chip->soc_empty_latched ||
+	    qcom_qg_get_voltage(chip, QG_S2_NORMAL_AVG_V_DATA0_REG, &voltage_uv) ||
+	    qcom_qg_get_voltage(chip, QG_LAST_ADC_V_DATA0_REG, &last_uv) ||
+	    voltage_uv < QG_SOC_EMPTY_MIN_PLAUSIBLE_UV ||
+	    voltage_uv >= empty_voltage_uv || last_uv >= empty_voltage_uv) {
+		if (!chip->soc_empty_latched)
+			chip->soc_empty_count = 0;
+		return;
+	}
+	if (++chip->soc_empty_count < QG_SOC_EMPTY_SAMPLES)
+		return;
+	chip->soc_empty_latched = true;
+
+	delivered = soc->valid ? (int)-soc->relative_uah : 0;
+	if (soc->valid && delivered < soc->design_uah &&
+	    delivered >= design / 100 * QG_SOC_LEARN_MIN_PERCENT &&
+	    !qcom_qg_get_current(chip, QG_S2_NORMAL_AVG_I_DATA0_REG, &current_ua) &&
+	    abs(current_ua) <= QG_SOC_LEARN_MAX_CURRENT_UA) {
+		raw = cpu_to_le16(delivered / 1000);
+		if (!qcom_qg_sdam_write(chip, QG_SDAM_LEARNED_CAPACITY_OFFSET,
+					&raw, sizeof(raw))) {
+			capacity = delivered;
+			state->nominal_uah = capacity;
+			state->nominal_measured = true;
+			dev_info(chip->dev, "learned capacity %d uAh\n", capacity);
+		}
+	} else if (soc->design_uah > 0) {
+		capacity = soc->design_uah;
+	}
+	dev_warn(chip->dev, "battery empty: %d uV average, reporting 0%%\n",
+		 voltage_uv);
+	qcom_qg_soc_seed(soc, capacity, -(s64)capacity, sample_ns);
+}
+
 /*
  * Seed the coulomb counter from the SDAM record. Returns 1 when restored,
  * 0 when the record is unusable (caller may clear it) and a negative errno
@@ -918,12 +1021,8 @@ static int qcom_qg_soc_restore(struct qcom_qg_chip *chip, int temp_dc,
 
 	design = soc->design_uah > 0 ? soc->design_uah :
 		chip->integrated_soc.nominal_uah;
-	qg_experimental_soc_init(soc, design);
-	soc->relative_uah = div_s64((s64)design * (saved_soc - 100), 100);
-	/* Integrate from just before this sample; the gap check needs a time. */
-	soc->last_ms = div_u64(sample_ns, NSEC_PER_MSEC) - 1;
-	soc->have_time = true;
-	soc->valid = true;
+	qcom_qg_soc_seed(soc, design,
+			 div_s64((s64)design * (saved_soc - 100), 100), sample_ns);
 	dev_info(chip->dev, "restored SOC %d%% saved %us ago\n", saved_soc,
 		 now - saved_time);
 	return 1;
@@ -1142,6 +1241,8 @@ static void qcom_qg_soc_work(struct work_struct *work)
 				 observation.environment.time_ns))
 		qcom_qg_soc_clear_saved(chip);
 	qg_soc_integration_sample(&chip->integrated_soc, &observation);
+	qcom_qg_soc_empty_check(chip, observed && observation.environment.phase == 2,
+				observation.environment.time_ns);
 	if (ret_temp >= 0 && chip->integrated_soc.soc.valid)
 		qcom_qg_soc_save(chip, temp_mc / 100, false);
 	qcom_qg_soc_debug(chip);
@@ -1414,7 +1515,10 @@ static int qcom_qg_probe(struct platform_device *pdev)
 	if (experimental_soc && chip->batt_info->charge_full_design_uah <= 0)
 		return dev_err_probe(chip->dev, -EINVAL, "Invalid design capacity\n");
 	qg_soc_integration_init(&chip->integrated_soc,
-				chip->batt_info->charge_full_design_uah);
+				qcom_qg_learned_capacity_uah(chip));
+	chip->integrated_soc.nominal_measured =
+		chip->integrated_soc.nominal_uah !=
+		chip->batt_info->charge_full_design_uah;
 	if (experimental_soc) {
 		ret = qcom_qg_soc_profile_init(chip);
 		if (ret)

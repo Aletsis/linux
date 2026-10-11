@@ -134,6 +134,9 @@ void qg_soc_integration_sample(struct qg_soc_integration *state,
 #else
 		window /= 100000;
 #endif
+		/* A measured capacity already spans Full to cutoff. */
+		if (state->nominal_measured)
+			window = state->nominal_uah;
 		if (window <= 0 || window > state->nominal_uah) {
 			qg_soc_integration_gap(state, now_ns);
 			state->recovery.bound = false;
