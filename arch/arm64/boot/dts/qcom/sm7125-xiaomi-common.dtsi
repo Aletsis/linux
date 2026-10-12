@@ -1154,14 +1154,47 @@
 			};
 		};
 
+		/*
+		 * Skin temperature. Under a sustained all-core load this
+		 * sensor passes 50 C in about six minutes while the CPU
+		 * sensors settle near 80 C, below their own 90 C trips, so
+		 * nothing else slows the phone down. The trip points are the
+		 * vendor kernel's reference ones for this thermistor.
+		 */
 		quiet-thermal {
+			polling-delay-passive = <1000>;
+
 			thermal-sensors = <&pm6150l_adc_tm 0>;
 
 			trips {
-				active-config0 {
-					temperature = <125000>;
-					hysteresis = <1000>;
+				quiet_alert0: trip-point0 {
+					temperature = <47000>;
+					hysteresis = <2000>;
 					type = "passive";
+				};
+
+				quiet_alert1: trip-point1 {
+					temperature = <50000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&quiet_alert0>;
+					cooling-device = <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&quiet_alert1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
