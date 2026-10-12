@@ -1843,6 +1843,7 @@ static const char * const s5kgw1_supply_names[] = {
 };
 
 struct s5kgw1 {
+	struct device_link *lens_link;
 	struct clk *xvclk;
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(s5kgw1_supply_names)];
@@ -2289,48 +2290,12 @@ static const struct v4l2_subdev_ops s5kgw1_subdev_ops = {
 	.pad = &s5kgw1_pad_ops,
 };
 
-static int s5kgw1_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct s5kgw1 *s5kgw1 = to_s5kgw1_subdev(sd);
-	int ret;
-
-	dev_info(&client->dev, "%s\n", __func__);
-	ret = pm_runtime_resume_and_get(&client->dev);
-	if (ret < 0) {
-		dev_err(&client->dev, "pm_runtime_resume_and_get failed: %d\n", ret);
-		return ret;
-	}
-
-	/* Pre-program mode registers so s_stream starts instantaneously (<1ms) */
-	if (!s5kgw1->mode_programmed) {
-		dev_info(s5kgw1->sd.dev, "Pre-programming mode %ux%u (%u regs)...\n",
-			 s5kgw1->cur_mode->width, s5kgw1->cur_mode->height,
-			 s5kgw1->cur_mode->reg_list.num_of_regs);
-		ret = s5kgw1_write_reg_list(s5kgw1, &s5kgw1->cur_mode->reg_list);
-		if (ret) {
-			dev_err(s5kgw1->sd.dev, "Failed to write mode register list: %d\n", ret);
-			pm_runtime_put(&client->dev);
-			return ret;
-		}
-		s5kgw1->mode_programmed = true;
-	}
-
-	return 0;
-}
-
-static int s5kgw1_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	dev_info(&client->dev, "%s\n", __func__);
-	pm_runtime_put(&client->dev);
-	return 0;
-}
-
+/*
+ * No .open/.close: the sensor is powered from s_stream only. Powering it (and
+ * pre-programming the mode) on open kept it on for as long as libcamera held
+ * the sub-device, i.e. permanently. start_stream writes the mode when needed.
+ */
 static const struct v4l2_subdev_internal_ops s5kgw1_internal_ops = {
-	.open = s5kgw1_open,
-	.close = s5kgw1_close,
 	.init_state = s5kgw1_init_state,
 };
 
@@ -2447,6 +2412,34 @@ static int s5kgw1_parse_of(struct s5kgw1 *s5kgw1)
 	return 0;
 }
 
+
+/*
+ * libcamera keeps the lens sub-device open for as long as the camera manager
+ * runs, so the focus actuator cannot rely on open()/close() for its power.
+ * Make it a runtime-PM supplier of the sensor instead: it is then powered
+ * exactly while the sensor is, and restores its position on resume.
+ */
+static struct device_link *s5kgw1_link_lens(struct device *dev)
+{
+	struct fwnode_handle *lens;
+	struct device_link *link;
+	struct device *lens_dev;
+
+	lens = fwnode_find_reference(dev_fwnode(dev), "lens-focus", 0);
+	if (IS_ERR(lens))
+		return NULL;
+	lens_dev = bus_find_device_by_fwnode(&i2c_bus_type, lens);
+	fwnode_handle_put(lens);
+	if (!lens_dev)
+		return NULL;
+	link = device_link_add(dev, lens_dev,
+			       DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
+	put_device(lens_dev);
+	if (!link)
+		dev_warn(dev, "failed to link the lens actuator\n");
+	return link;
+}
+
 static int s5kgw1_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -2514,6 +2507,8 @@ static int s5kgw1_probe(struct i2c_client *client)
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
 
+	s5kgw1->lens_link = s5kgw1_link_lens(dev);
+
 	ret = v4l2_async_register_subdev_sensor(sd);
 	if (ret) {
 		dev_err(dev, "v4l2 async register subdev failed\n");
@@ -2526,6 +2521,8 @@ static int s5kgw1_probe(struct i2c_client *client)
 	return 0;
 
 err_power_off:
+	if (s5kgw1->lens_link)
+		device_link_del(s5kgw1->lens_link);
 	pm_runtime_disable(dev);
 	pm_runtime_put_noidle(dev);
 	s5kgw1_power_off(dev);
@@ -2549,6 +2546,8 @@ static void s5kgw1_remove(struct i2c_client *client)
 	if (!pm_runtime_status_suspended(&client->dev))
 		s5kgw1_power_off(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
+	if (s5kgw1->lens_link)
+		device_link_del(s5kgw1->lens_link);
 }
 
 static const struct dev_pm_ops s5kgw1_pm_ops = {
