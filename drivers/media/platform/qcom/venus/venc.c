@@ -1064,6 +1064,21 @@ deinit:
 	return ret;
 }
 
+/*
+ * The bitstream buffer size is otherwise only an estimate from the frame
+ * size. The firmware knows what it needs for the session as configured, and
+ * fails every FILL_BUFFER with a session error if it gets less.
+ */
+static unsigned int venc_fw_bitstream_size(struct venus_inst *inst)
+{
+	struct hfi_buffer_requirements bufreq;
+
+	if (venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq))
+		return 0;
+
+	return ALIGN(bufreq.size, SZ_4K);
+}
+
 static int venc_out_num_buffers(struct venus_inst *inst, unsigned int *num)
 {
 	struct hfi_buffer_requirements bufreq;
@@ -1157,6 +1172,7 @@ static int venc_queue_setup(struct vb2_queue *q,
 						    inst->width,
 						    inst->height);
 		sizes[0] = max(sizes[0], inst->output_buf_size);
+		sizes[0] = max(sizes[0], venc_fw_bitstream_size(inst));
 		inst->output_buf_size = sizes[0];
 		break;
 	default:
