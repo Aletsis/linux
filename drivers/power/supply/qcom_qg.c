@@ -40,6 +40,12 @@ module_param(empty_voltage_uv, int, 0644);
 MODULE_PARM_DESC(empty_voltage_uv,
 		 "Average battery voltage below which a discharging battery is reported empty");
 
+/* The PMIC cuts power near 2.8 V; leave room for the sag of a load step. */
+static int critical_voltage_uv = 3000000;
+module_param(critical_voltage_uv, int, 0644);
+MODULE_PARM_DESC(critical_voltage_uv,
+		 "Average battery voltage below which 0% is reported whatever the load, to power off cleanly");
+
 #define QG_FIFO_CONTROL_REG		0x51
 #define QG_FIFO_DATA_REG			0x90
 #define QG_FIFO_MAX_SAMPLES		8
@@ -197,6 +203,14 @@ struct qcom_qg_ocv_record {
 #define QG_SOC_EMPTY_MIN_PLAUSIBLE_UV	2000000
 /* Learn capacity only from a moderate load; a heavy one sags too early. */
 #define QG_SOC_LEARN_MAX_CURRENT_UA	500000
+/*
+ * Below the cutoff with a heavier load than that while the coulomb counter
+ * still holds at least this much: the voltage is sagging across the battery
+ * resistance, the battery is not empty.
+ */
+#define QG_SOC_SAG_MIN_PERCENT		20
+/* 3 consecutive 5 s samples below the critical voltage. */
+#define QG_SOC_CRITICAL_SAMPLES		3
 #define QG_SOC_LEARN_MIN_PERCENT	30
 
 struct qcom_qg_chip {
@@ -249,6 +263,9 @@ struct qcom_qg_chip {
 	/* Voltage-based empty detection. */
 	unsigned int soc_empty_count;
 	bool soc_empty_latched;
+	/* Voltage near the PMIC cutoff under load: report 0% without re-seeding. */
+	unsigned int soc_critical_count;
+	bool soc_critical;
 };
 
 static void qcom_qg_soc_debug(struct qcom_qg_chip *chip)
@@ -924,11 +941,26 @@ static void qcom_qg_soc_seed(struct qg_experimental_soc *soc, int design_uah,
 	soc->valid = true;
 }
 
+/* What userspace sees: 0% while the voltage is critical, else the counter. */
+static int qcom_qg_soc_reported_capacity(struct qcom_qg_chip *chip)
+{
+	int capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+
+	return chip->soc_critical && capacity >= 0 ? 0 : capacity;
+}
+
 /*
  * The PMIC cuts power near 2.8 V with no warning. Report an empty battery
  * once the averaged voltage stays below the cutoff while discharging, so
  * userspace powers off cleanly, and remember how much charge the battery
  * really delivered since Full as the learned capacity.
+ *
+ * A worn battery also drops below the cutoff under a heavy load with plenty
+ * of charge left (seen: 3.13 V at 1.4 A with 57% counted, 3.66 V at 0.3 A a
+ * minute earlier). That is not empty: the counter must not be re-seeded to 0%
+ * and saved. Only if the voltage then gets close to the PMIC cutoff is 0%
+ * reported, without touching the counter, so the next boot still knows the
+ * real charge.
  */
 static void qcom_qg_soc_empty_check(struct qcom_qg_chip *chip, bool discharging,
 				    u64 sample_ns)
@@ -943,6 +975,8 @@ static void qcom_qg_soc_empty_check(struct qcom_qg_chip *chip, bool discharging,
 	if (!discharging) {
 		chip->soc_empty_count = 0;
 		chip->soc_empty_latched = false;
+		chip->soc_critical_count = 0;
+		chip->soc_critical = false;
 		return;
 	}
 	/*
@@ -957,8 +991,30 @@ static void qcom_qg_soc_empty_check(struct qcom_qg_chip *chip, bool discharging,
 	    voltage_uv >= empty_voltage_uv || last_uv >= empty_voltage_uv) {
 		if (!chip->soc_empty_latched)
 			chip->soc_empty_count = 0;
+		chip->soc_critical_count = 0;
 		return;
 	}
+
+	if (soc->valid &&
+	    qg_experimental_soc_capacity(soc) >= QG_SOC_SAG_MIN_PERCENT &&
+	    !qcom_qg_get_current(chip, QG_S2_NORMAL_AVG_I_DATA0_REG, &current_ua) &&
+	    abs(current_ua) > QG_SOC_LEARN_MAX_CURRENT_UA) {
+		chip->soc_empty_count = 0;
+		if (voltage_uv >= critical_voltage_uv) {
+			chip->soc_critical_count = 0;
+			return;
+		}
+		if (chip->soc_critical ||
+		    ++chip->soc_critical_count < QG_SOC_CRITICAL_SAMPLES)
+			return;
+		chip->soc_critical = true;
+		dev_warn(chip->dev,
+			 "battery voltage critical under load: %d uV average at %d uA with %d%% counted, reporting 0%%\n",
+			 voltage_uv, current_ua, qg_experimental_soc_capacity(soc));
+		return;
+	}
+	chip->soc_critical_count = 0;
+
 	if (++chip->soc_empty_count < QG_SOC_EMPTY_SAMPLES)
 		return;
 	chip->soc_empty_latched = true;
@@ -1174,7 +1230,7 @@ static void qcom_qg_soc_work(struct work_struct *work)
 		mutex_unlock(&chip->fifo_lock);
 		return;
 	}
-	old_capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+	old_capacity = qcom_qg_soc_reported_capacity(chip);
 	ret_status_before = power_supply_get_property_from_supplier(chip->batt_psy,
 								    POWER_SUPPLY_PROP_STATUS,
 								    &status_before);
@@ -1246,7 +1302,7 @@ static void qcom_qg_soc_work(struct work_struct *work)
 	if (ret_temp >= 0 && chip->integrated_soc.soc.valid)
 		qcom_qg_soc_save(chip, temp_mc / 100, false);
 	qcom_qg_soc_debug(chip);
-	capacity = qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+	capacity = qcom_qg_soc_reported_capacity(chip);
 	mutex_unlock(&chip->fifo_lock);
 	if (capacity != old_capacity)
 		power_supply_changed(chip->batt_psy);
@@ -1297,7 +1353,7 @@ static int qcom_qg_get_capacity(struct qcom_qg_chip *chip, int *val)
 	if (experimental_soc) {
 		mutex_lock(&chip->fifo_lock);
 		ret = READ_ONCE(chip->soc_paused) ? -1 :
-			qg_experimental_soc_capacity(&chip->integrated_soc.soc);
+			qcom_qg_soc_reported_capacity(chip);
 		mutex_unlock(&chip->fifo_lock);
 		if (ret >= 0) {
 			*val = ret;
