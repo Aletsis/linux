@@ -92,6 +92,8 @@ struct qrtr_sock {
 	struct sock sk;
 	struct sockaddr_qrtr us;
 	struct sockaddr_qrtr peer;
+	/* Creator of the socket, to tell who a wakeup was for. */
+	char comm[TASK_COMM_LEN];
 };
 
 static inline struct qrtr_sock *qrtr_sk(struct sock *sk)
@@ -558,8 +560,16 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 		 * replies would abort every suspend.
 		 */
 		if (qrtr_wakeup_nid >= 0 && cb->src_node == qrtr_wakeup_nid &&
-		    !ipc->sk.sk_kern_sock)
+		    !ipc->sk.sk_kern_sock) {
+			const u8 *qmi = data + hdrlen;
+
+			/* QMI header: type, txn id (le16), message id (le16). */
+			pr_debug("qrtr: wakeup: %u:%u -> port %u (%s), %zu bytes, qmi type %u msg 0x%04x\n",
+				 cb->src_node, cb->src_port, cb->dst_port,
+				 ipc->comm, size, size >= 5 ? qmi[0] : 0,
+				 size >= 5 ? qmi[3] | qmi[4] << 8 : 0);
 			pm_wakeup_ws_event(node->ws, QRTR_WAKEUP_TIMEOUT_MS, true);
+		}
 
 		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
 			qrtr_port_put(ipc);
@@ -1309,6 +1319,7 @@ static int qrtr_create(struct net *net, struct socket *sock,
 	sock->ops = &qrtr_proto_ops;
 
 	ipc = qrtr_sk(sk);
+	get_task_comm(ipc->comm, current);
 	ipc->us.sq_family = AF_QIPCRTR;
 	ipc->us.sq_node = qrtr_local_nid;
 	ipc->us.sq_port = 0;
