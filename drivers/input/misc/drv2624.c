@@ -13,14 +13,13 @@
 #include <linux/fs.h>
 #include <linux/i2c.h>
 #include <linux/device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/sched.h>
 #include <linux/spinlock_types.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/of_irq.h>
 #include <linux/regmap.h>
 #include <linux/err.h>
@@ -119,16 +118,16 @@ static void drv2624_reset(struct drv2624_data *drv2624)
 {
 	int ret;
 
-	gpio_set_value(drv2624->plat_data.gpio_nrst, 0);
+	gpiod_set_raw_value_cansleep(drv2624->plat_data.gpio_nrst, 0);
 	usleep_range(1000, 2000);
-	gpio_set_value(drv2624->plat_data.gpio_nrst, 1);
+	gpiod_set_raw_value_cansleep(drv2624->plat_data.gpio_nrst, 1);
 	usleep_range(1000, 2000);
 
 	regcache_mark_dirty(drv2624->regmap);
 	ret = regcache_sync(drv2624->regmap);
 	if (ret) {
 		dev_err(drv2624->dev, "Failed to sync cache: %d\n", ret);
-		gpio_direction_output(drv2624->plat_data.gpio_nrst, 0);
+		gpiod_direction_output_raw(drv2624->plat_data.gpio_nrst, 0);
 	}
 }
 
@@ -543,14 +542,16 @@ static int drv2624_parse_dt(struct device *dev, struct drv2624_data *drv2624)
 	int ret = 0;
 	unsigned int value;
 
-	pdata->gpio_nrst = of_get_named_gpio(np, "reset-gpios", 0);
-	if (!gpio_is_valid(pdata->gpio_nrst)) {
-		dev_err(drv2624->dev,
-			"Looking up %s property in node %s failed %d\n",
-			"ti,reset-gpio", np->full_name, pdata->gpio_nrst);
-		ret = -EINVAL;
+	/* The driver has always driven the line with raw levels. */
+	pdata->gpio_nrst = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+	if (IS_ERR(pdata->gpio_nrst)) {
+		ret = PTR_ERR(pdata->gpio_nrst);
+		dev_err(drv2624->dev, "Looking up reset-gpios in node %s failed %d\n",
+			np->full_name, ret);
+		pdata->gpio_nrst = NULL;
 		goto drv2624_parse_dt_out;
 	}
+	gpiod_set_consumer_name(pdata->gpio_nrst, "DRV2624-NRST");
 
 	ret = of_property_read_u32(np, "ti,smart-loop", &value);
 	if (ret) {
@@ -852,20 +853,10 @@ static int drv2624_i2c_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	if (gpio_is_valid(drv2624->plat_data.gpio_nrst)) {
-		err = devm_gpio_request(&client->dev,
-					drv2624->plat_data.gpio_nrst,
-					"DRV2624-NRST");
-		if (err < 0) {
-			dev_err(drv2624->dev,
-				"%s: GPIO %d request NRST error\n",
-				__func__, drv2624->plat_data.gpio_nrst);
-			return err;
-		}
-
-		gpio_direction_output(drv2624->plat_data.gpio_nrst, 0);
+	if (drv2624->plat_data.gpio_nrst) {
+		gpiod_direction_output_raw(drv2624->plat_data.gpio_nrst, 0);
 		usleep_range(1000, 2000);
-		gpio_direction_output(drv2624->plat_data.gpio_nrst, 1);
+		gpiod_direction_output_raw(drv2624->plat_data.gpio_nrst, 1);
 		usleep_range(1000, 2000); /* t(on) = 1ms */
 	}
 

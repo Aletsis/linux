@@ -252,7 +252,7 @@ struct drv2624_diag_result {
 };
 
 struct drv2624_platform_data {
-	int gpio_nrst;
+	struct gpio_desc *gpio_nrst;
 	int gpio_int;
 	unsigned char loop;
 	struct actuator_data actuator;
