@@ -1173,6 +1173,12 @@
 					type = "passive";
 				};
 
+				quiet_alert_gpu: trip-point-gpu {
+					temperature = <48000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				quiet_alert1: trip-point1 {
 					temperature = <50000>;
 					hysteresis = <2000>;
@@ -1185,6 +1191,11 @@
 					trip = <&quiet_alert0>;
 					cooling-device = <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
 							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map-gpu {
+					trip = <&quiet_alert_gpu>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 
 				map1 {
