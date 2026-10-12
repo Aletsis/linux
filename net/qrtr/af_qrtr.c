@@ -121,7 +121,6 @@ static DEFINE_XARRAY_ALLOC(qrtr_ports);
  * @ep: endpoint
  * @ref: reference count for node
  * @nid: node id
- * @ws: wakeup source, triggered for packets from the wakeup node
  * @qrtr_tx_flow: tree of qrtr_tx_flow, keyed by node << 32 | port
  * @qrtr_tx_lock: lock for qrtr_tx_flow inserts
  * @rx_queue: receive queue
@@ -132,7 +131,6 @@ struct qrtr_node {
 	struct qrtr_endpoint *ep;
 	struct kref ref;
 	unsigned int nid;
-	struct wakeup_source *ws;
 
 	struct radix_tree_root qrtr_tx_flow;
 	struct mutex qrtr_tx_lock; /* for qrtr_tx_flow */
@@ -168,6 +166,13 @@ struct qrtr_tx_flow {
 static int qrtr_wakeup_nid;
 module_param_named(wakeup_nid, qrtr_wakeup_nid, int, 0644);
 MODULE_PARM_DESC(wakeup_nid, "Node whose packets wake the system (default 0, -1 to disable)");
+
+/*
+ * One wakeup source for the whole router, registered at init: registering it
+ * in qrtr_endpoint_register() lengthens the time a transport spends in probe
+ * before it can accept packets, and a HELLO lost there leaves the link dead.
+ */
+static struct wakeup_source *qrtr_ws;
 
 /* Long enough for the packet to reach its socket and userspace to react. */
 #define QRTR_WAKEUP_TIMEOUT_MS	2000
@@ -208,7 +213,6 @@ static void __qrtr_node_release(struct kref *kref)
 	mutex_unlock(&qrtr_node_lock);
 
 	skb_queue_purge(&node->rx_queue);
-	wakeup_source_unregister(node->ws);
 
 	/* Free tx flow counters */
 	radix_tree_for_each_slot(slot, &node->qrtr_tx_flow, &iter, 0) {
@@ -568,7 +572,7 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 				 cb->src_node, cb->src_port, cb->dst_port,
 				 ipc->comm, size, size >= 5 ? qmi[0] : 0,
 				 size >= 5 ? qmi[3] | qmi[4] << 8 : 0);
-			pm_wakeup_ws_event(node->ws, QRTR_WAKEUP_TIMEOUT_MS, true);
+			pm_wakeup_ws_event(qrtr_ws, QRTR_WAKEUP_TIMEOUT_MS, true);
 		}
 
 		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
@@ -641,9 +645,6 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 
 	INIT_RADIX_TREE(&node->qrtr_tx_flow, GFP_KERNEL);
 	mutex_init(&node->qrtr_tx_lock);
-
-	/* Registered here because qrtr_endpoint_post() may run in atomic context. */
-	node->ws = wakeup_source_register(NULL, "qrtr");
 
 	qrtr_node_assign(node, nid);
 
@@ -1349,6 +1350,8 @@ static int __init qrtr_proto_init(void)
 	if (rc)
 		goto err_sock;
 
+	qrtr_ws = wakeup_source_register(NULL, "qrtr");
+
 	return 0;
 
 err_sock:
@@ -1361,6 +1364,7 @@ postcore_initcall(qrtr_proto_init);
 
 static void __exit qrtr_proto_fini(void)
 {
+	wakeup_source_unregister(qrtr_ws);
 	qrtr_ns_remove();
 	sock_unregister(qrtr_family.family);
 	proto_unregister(&qrtr_proto);
