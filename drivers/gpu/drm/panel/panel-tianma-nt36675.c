@@ -44,15 +44,18 @@ static void tianma_nt36675_reset(struct tianma_nt36675 *ctx)
 static int tianma_nt36675_on(struct tianma_nt36675 *ctx)
 {
 	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 	struct device *dev = &dsi->dev;
 	int ret;
 
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x10);
-	mipi_dsi_dcs_write_seq(dsi, 0xfb, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x3b, 0x03, 0x1e, 0x0a, 0x04, 0x04);
-	mipi_dsi_dcs_write_seq(dsi, 0xb0, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x3b, 0x03, 0x1e, 0x0a, 0x04, 0x04);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x00);
+	if (dsi_ctx.accum_err)
+		return dsi_ctx.accum_err;
 
 	ret = mipi_dsi_dcs_set_tear_on(dsi, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
 	if (ret < 0) {
@@ -66,33 +69,35 @@ static int tianma_nt36675_on(struct tianma_nt36675 *ctx)
 		return ret;
 	}
 
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x24);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x27);
-	mipi_dsi_dcs_write_seq(dsi, 0xfb, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x07, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_SET_VSYNC_TIMING, 0x25);
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x23);
-	mipi_dsi_dcs_write_seq(dsi, 0xfb, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x0a, 0x20);
-	mipi_dsi_dcs_write_seq(dsi, 0x0b, 0x20);
-	mipi_dsi_dcs_write_seq(dsi, 0x0c, 0x20);
-	mipi_dsi_dcs_write_seq(dsi, 0x0d, 0x2a);
-	mipi_dsi_dcs_write_seq(dsi, 0x10, 0x50);
-	mipi_dsi_dcs_write_seq(dsi, 0x11, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x12, 0x95);
-	mipi_dsi_dcs_write_seq(dsi, 0x15, 0x68);
-	mipi_dsi_dcs_write_seq(dsi, 0x16, 0x0b);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_SET_PARTIAL_ROWS, 0xff);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_SET_PARTIAL_COLUMNS, 0xff);
-	mipi_dsi_dcs_write_seq(dsi, 0x32, 0xff);
-	mipi_dsi_dcs_write_seq(dsi, 0x33, 0xfe);
-	mipi_dsi_dcs_write_seq(dsi, 0x34, 0xfd);
-	mipi_dsi_dcs_write_seq(dsi, 0x35, 0xfa);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_SET_ADDRESS_MODE, 0xf6);
-	mipi_dsi_dcs_write_seq(dsi, 0x37, 0xf2);
-	mipi_dsi_dcs_write_seq(dsi, 0x38, 0xf0);
-	mipi_dsi_dcs_write_seq(dsi, 0x39, 0xee);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x24);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x27);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x07, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_VSYNC_TIMING, 0x25);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x23);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x0a, 0x20);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x0b, 0x20);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x0c, 0x20);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x0d, 0x2a);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x10, 0x50);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x12, 0x95);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x15, 0x68);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x16, 0x0b);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_PARTIAL_ROWS, 0xff);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_PARTIAL_COLUMNS, 0xff);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x32, 0xff);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x33, 0xfe);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x34, 0xfd);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0xfa);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_ADDRESS_MODE, 0xf6);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x37, 0xf2);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x38, 0xf0);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x39, 0xee);
+	if (dsi_ctx.accum_err)
+		return dsi_ctx.accum_err;
 
 	ret = mipi_dsi_dcs_set_pixel_format(dsi, 0xec);
 	if (ret < 0) {
@@ -100,14 +105,16 @@ static int tianma_nt36675_on(struct tianma_nt36675 *ctx)
 		return ret;
 	}
 
-	mipi_dsi_dcs_write_seq(dsi, 0x3b, 0xea);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_SET_3D_CONTROL, 0xe8);
-	mipi_dsi_dcs_write_seq(dsi, 0x3f, 0xe7);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_SET_VSYNC_TIMING, 0xe6);
-	mipi_dsi_dcs_write_seq(dsi, 0x41, 0xe5);
-	mipi_dsi_dcs_write_seq(dsi, 0xa0, 0x11);
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x10);
-	mipi_dsi_dcs_write_seq(dsi, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x3b, 0xea);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_3D_CONTROL, 0xe8);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x3f, 0xe7);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_VSYNC_TIMING, 0xe6);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x41, 0xe5);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xa0, 0x11);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	if (dsi_ctx.accum_err)
+		return dsi_ctx.accum_err;
 
 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
 	if (ret < 0) {
@@ -123,11 +130,13 @@ static int tianma_nt36675_on(struct tianma_nt36675 *ctx)
 	}
 	usleep_range(5000, 6000);
 
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x27);
-	mipi_dsi_dcs_write_seq(dsi, 0xfb, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x3f, 0x01);
-	mipi_dsi_dcs_write_seq(dsi, 0x43, 0x08);
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x27);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x3f, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x43, 0x08);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
+	if (dsi_ctx.accum_err)
+		return dsi_ctx.accum_err;
 
 	return 0;
 }
@@ -135,12 +144,15 @@ static int tianma_nt36675_on(struct tianma_nt36675 *ctx)
 static int tianma_nt36675_off(struct tianma_nt36675 *ctx)
 {
 	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 	struct device *dev = &dsi->dev;
 	int ret;
 
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
-	mipi_dsi_dcs_write_seq(dsi, 0xff, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
+	if (dsi_ctx.accum_err)
+		return dsi_ctx.accum_err;
 
 	ret = mipi_dsi_dcs_set_display_off(dsi);
 	if (ret < 0) {
@@ -245,9 +257,11 @@ static int tianma_nt36675_probe(struct mipi_dsi_device *dsi)
 	struct tianma_nt36675 *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, struct tianma_nt36675, panel,
+				   &tianma_nt36675_panel_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->supply = devm_regulator_get(dev, "vddio");
 	if (IS_ERR(ctx->supply))
@@ -266,8 +280,6 @@ static int tianma_nt36675_probe(struct mipi_dsi_device *dsi)
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
-	drm_panel_init(&ctx->panel, dev, &tianma_nt36675_panel_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
 	ret = drm_panel_of_backlight(&ctx->panel);
