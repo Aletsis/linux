@@ -38,6 +38,7 @@ struct csiphy_lanes_cfg {
 	int num_data;
 	struct csiphy_lane *data;
 	struct csiphy_lane clk;
+	bool is_cphy;
 };
 
 struct csiphy_csi2_cfg {

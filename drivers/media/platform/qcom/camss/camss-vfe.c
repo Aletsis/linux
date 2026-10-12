@@ -344,6 +344,7 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 	case CAMSS_2290:
 	case CAMSS_6150:
 	case CAMSS_6350:
+	case CAMSS_7180:
 	case CAMSS_7280:
 	case CAMSS_8x96:
 	case CAMSS_8250:
@@ -996,10 +997,8 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				return -EINVAL;
 			}
 
-			/* if sensor pixel clock is not available */
-			/* set highest possible VFE clock rate */
-			if (min_rate == 0)
-				j = clock->nfreqs - 1;
+			/* For high-throughput sensors (e.g. 64MP) run VFE at max rate (Turbo 600MHz) */
+			j = clock->nfreqs - 1;
 
 			rate = clk_round_rate(clock->clk, clock->freq[j]);
 			if (rate < 0) {
@@ -1013,6 +1012,8 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				dev_err(dev, "clk set rate failed: %d\n", ret);
 				return ret;
 			}
+			dev_info(dev, "vfe%d: clock %s set to %ld Hz (requested %u)\n",
+				 vfe->id, clock->name, rate, clock->freq[j]);
 		}
 	}
 
@@ -1191,16 +1192,32 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	vfe_buf_flush_pending(output, state);
 
-	if (output->buf[0])
+	if (output->buf[0]){
 		vb2_buffer_done(&output->buf[0]->vb.vb2_buf, state);
+		output->buf[0] = NULL;
+	}
 
-	if (output->buf[1])
+	if (output->buf[1]){
 		vb2_buffer_done(&output->buf[1]->vb.vb2_buf, state);
+		output->buf[1] = NULL;
+	}
 
 	if (output->last_buffer) {
 		vb2_buffer_done(&output->last_buffer->vb.vb2_buf, state);
 		output->last_buffer = NULL;
 	}
+
+	/*
+	 * struct vfe_output (camss-vfe.h:69-77) overlays gen1.{active_buf,
+	 * wait_sof} and gen2.active_num in an unnamed union. Writing the
+	 * gen2 arm unconditionally would corrupt gen1.active_buf on the
+	 * gen1 callers of this shared flush_buffers (vfe_video_ops_gen1
+	 * in camss-vfe-gen1.c). Only zero active_num when the hw_ops
+	 * pointer identifies a gen2 variant (VFE-170 or VFE-480).
+	 */
+	if (vfe->res->hw_ops == &vfe_ops_170 ||
+	    vfe->res->hw_ops == &vfe_ops_480)
+		output->gen2.active_num = 0;
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
@@ -2005,6 +2022,7 @@ static int vfe_bpl_align_rdi(struct vfe_device *vfe)
 	switch (vfe->camss->res->version) {
 	case CAMSS_6150:
 	case CAMSS_6350:
+	case CAMSS_7180:
 	case CAMSS_7280:
 	case CAMSS_8250:
 	case CAMSS_8280XP:

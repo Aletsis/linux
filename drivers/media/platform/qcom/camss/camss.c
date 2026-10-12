@@ -1703,6 +1703,280 @@ static const struct resources_icc icc_res_sm6150[] = {
 	},
 };
 
+static const struct camss_subdev_resources csiphy_res_7180[] = {
+	/* CSIPHY0 */
+	{
+		.regulators = {},
+		.clock = {
+			"csiphy0",
+			"csiphy0_timer"
+		},
+		.clock_rate = {
+			{ 150000000, 270000000, 360000000 },
+			{ 300000000 },
+		},
+		.reg = { "csiphy0" },
+		.interrupt = { "csiphy0" },
+		.csiphy = {
+			.id = 0,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845
+		}
+	},
+	/* CSIPHY1 */
+	{
+		.regulators = {},
+		.clock = {
+			"csiphy1",
+			"csiphy1_timer"
+		},
+		.clock_rate = {
+			{ 150000000, 270000000, 360000000 },
+			{ 300000000 },
+		},
+		.reg = { "csiphy1" },
+		.interrupt = { "csiphy1" },
+		.csiphy = {
+			.id = 1,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845
+		}
+	},
+	/* CSIPHY2 */
+	{
+		.regulators = {},
+		.clock = {
+			"csiphy2",
+			"csiphy2_timer"
+		},
+		.clock_rate = {
+			{ 150000000, 270000000, 360000000 },
+			{ 300000000 },
+		},
+		.reg = { "csiphy2" },
+		.interrupt = { "csiphy2" },
+		.csiphy = {
+			.id = 2,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845
+		}
+	},
+	/* CSIPHY3 */
+	{
+		.regulators = {},
+		.clock = {
+			"csiphy3",
+			"csiphy3_timer"
+		},
+		.clock_rate = {
+			{ 150000000, 270000000, 360000000 },
+			{ 300000000 },
+		},
+		.reg = { "csiphy3" },
+		.interrupt = { "csiphy3" },
+		.csiphy = {
+			.id = 3,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845
+		}
+	}
+};
+
+static const struct camss_subdev_resources csid_res_7180[] = {
+	/* CSID0 */
+	{
+		.regulators = {
+			{ .supply = "vdda-phy", .init_load_uA = 0 },
+			{ .supply = "vdda-pll", .init_load_uA = 0 }
+		},
+		.clock = {
+			"soc_ahb",
+			"vfe0",
+			"vfe0_cphy_rx",
+			"csi0"
+		},
+		.clock_rate = {
+			{ 0 },
+			{ 240000000, 360000000, 432000000, 600000000 },
+			{ 150000000, 270000000, 360000000 },
+			{ 150000000, 270000000, 360000000, 480000000 },
+		},
+		.reg = { "csid0" },
+		.interrupt = { "csid0" },
+		.csid = {
+			.hw_ops = &csid_ops_gen2,
+			.parent_dev_ops = &vfe_parent_dev_ops,
+			.formats = &csid_formats_gen2
+		}
+	},
+	/* CSID1 */
+	{
+		.regulators = {
+			{ .supply = "vdda-phy", .init_load_uA = 0 },
+			{ .supply = "vdda-pll", .init_load_uA = 0 }
+		},
+		.clock = {
+			"soc_ahb",
+			"vfe1",
+			"vfe1_cphy_rx",
+			"csi1",
+		},
+		.clock_rate = {
+			{ 0 },
+			{ 240000000, 360000000, 432000000, 600000000 },
+			{ 150000000, 270000000, 360000000 },
+			{ 150000000, 270000000, 360000000, 480000000 },
+		},
+		.reg = { "csid1" },
+		.interrupt = { "csid1" },
+		.csid = {
+			.hw_ops = &csid_ops_gen2,
+			.parent_dev_ops = &vfe_parent_dev_ops,
+			.formats = &csid_formats_gen2
+		}
+	},
+	/* CSID2 */
+	{
+		.regulators = {
+			{ .supply = "vdda-phy", .init_load_uA = 0 },
+			{ .supply = "vdda-pll", .init_load_uA = 0 }
+		},
+		.clock = {
+			"soc_ahb",
+			"vfe_lite",
+			"vfe_lite_cphy_rx",
+			"csi2",
+		},
+		.clock_rate = {
+			{ 0 },
+			{ 240000000, 360000000, 432000000, 600000000 },
+			{ 150000000, 270000000, 360000000 },
+			{ 150000000, 270000000, 360000000, 480000000 },
+		},
+		.reg = { "csid2" },
+		.interrupt = { "csid2" },
+		.csid = {
+			.is_lite = true,
+			.hw_ops = &csid_ops_gen2,
+			.parent_dev_ops = &vfe_parent_dev_ops,
+			.formats = &csid_formats_gen2
+		}
+	}
+};
+
+static const struct camss_subdev_resources vfe_res_7180[] = {
+	/* VFE0 */
+	{
+		.regulators = {},
+		.clock = {
+			"camnoc_axi",
+			"cpas_ahb",
+			"soc_ahb",
+			"vfe0",
+			"vfe0_axi",
+			"csi0",
+		},
+		.clock_rate = {
+			{ 0 },
+			{ 0 },
+			{ 0 },
+			{ 19200000, 240000000, 360000000, 432000000, 600000000 },
+			{ 0 },
+			{ 150000000, 270000000, 360000000, 480000000 },
+		},
+		.reg = { "vfe0" },
+		.interrupt = { "vfe0" },
+		.vfe = {
+			.line_num = 4,
+			.has_pd = true,
+			.pd_name = "ife0",
+			.hw_ops = &vfe_ops_170,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		}
+	},
+	/* VFE1 */
+	{
+		.regulators = {},
+		.clock = {
+			"camnoc_axi",
+			"cpas_ahb",
+			"soc_ahb",
+			"vfe1",
+			"vfe1_axi",
+			"csi1",
+		},
+		.clock_rate = {
+			{ 0 },
+			{ 0 },
+			{ 0 },
+			{ 19200000, 240000000, 360000000, 432000000, 600000000 },
+			{ 0 },
+			{ 150000000, 270000000, 360000000, 480000000 },
+		},
+		.reg = { "vfe1" },
+		.interrupt = { "vfe1" },
+		.vfe = {
+			.line_num = 4,
+			.has_pd = true,
+			.pd_name = "ife1",
+			.hw_ops = &vfe_ops_170,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		}
+	},
+	/* VFE-lite */
+	{
+		.regulators = {},
+		.clock = {
+			"camnoc_axi",
+			"cpas_ahb",
+			"soc_ahb",
+			"vfe_lite",
+			"csi2",
+		},
+		.clock_rate = {
+			{ 0 },
+			{ 0 },
+			{ 0 },
+			{ 19200000, 240000000, 360000000, 432000000, 600000000 },
+			{ 150000000, 270000000, 360000000, 480000000 },
+		},
+		.reg = { "vfe_lite" },
+		.interrupt = { "vfe_lite" },
+		.vfe = {
+			.is_lite = true,
+			.line_num = 4,
+			.hw_ops = &vfe_ops_170,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		}
+	}
+};
+
+static const struct resources_icc icc_res_7180[] = {
+	{
+		.name = "cam_ahb",
+		.icc_bw_tbl.avg = 125000,
+		.icc_bw_tbl.peak = 250000,
+	},
+	{
+		.name = "cam_hf_0_camnoc",
+		.icc_bw_tbl.avg = 2097152,
+		.icc_bw_tbl.peak = 2097152,
+	},
+	{
+		.name = "cam_hf_1_camnoc",
+		.icc_bw_tbl.avg = 2097152,
+		.icc_bw_tbl.peak = 2097152,
+	},
+	{
+		.name = "cam_sf_camnoc",
+		.icc_bw_tbl.avg = 2097152,
+		.icc_bw_tbl.peak = 2097152,
+	},
+};
+
 static const struct camss_subdev_resources csiphy_res_sm6350[] = {
 	/* CSIPHY0 */
 	{
@@ -4755,20 +5029,26 @@ static int camss_parse_endpoint_node(struct device *dev,
 		return ret;
 
 	/*
-	 * Most SoCs support both D-PHY and C-PHY standards, but currently only
-	 * D-PHY is supported in the driver.
+	 * Most SoCs support both D-PHY and C-PHY standards. C-PHY is only
+	 * implemented in the SC7180 CSIPHY/CSID code so far.
 	 */
-	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY) {
+	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY &&
+	    vep.bus_type != V4L2_MBUS_CSI2_CPHY) {
 		dev_err(dev, "Unsupported bus type %d\n", vep.bus_type);
 		return -EINVAL;
 	}
 
 	csd->interface.csiphy_id = vep.base.port;
 
+	lncfg->is_cphy = vep.bus_type == V4L2_MBUS_CSI2_CPHY;
+
 	mipi_csi2 = &vep.bus.mipi_csi2;
 	lncfg->clk.pos = mipi_csi2->clock_lane;
 	lncfg->clk.pol = mipi_csi2->lane_polarities[0];
 	lncfg->num_data = mipi_csi2->num_data_lanes;
+
+	dev_dbg(dev, "endpoint %pfw: port=%d, is_cphy=%d, num_data=%d\n",
+		ep, csd->interface.csiphy_id, lncfg->is_cphy, lncfg->num_data);
 
 	lncfg->data = devm_kcalloc(dev,
 				   lncfg->num_data, sizeof(*lncfg->data),
@@ -5682,6 +5962,19 @@ static const struct camss_resources sc8280xp_resources = {
 	.vfe_num = ARRAY_SIZE(vfe_res_sc8280xp),
 };
 
+static const struct camss_resources sc7180_resources = {
+	.version = CAMSS_7180,
+	.pd_name = "top",
+	.csiphy_res = csiphy_res_7180,
+	.csid_res = csid_res_7180,
+	.vfe_res = vfe_res_7180,
+	.icc_res = icc_res_7180,
+	.icc_path_num = ARRAY_SIZE(icc_res_7180),
+	.csiphy_num = ARRAY_SIZE(csiphy_res_7180),
+	.csid_num = ARRAY_SIZE(csid_res_7180),
+	.vfe_num = ARRAY_SIZE(vfe_res_7180),
+};
+
 static const struct camss_resources sc7280_resources = {
 	.version = CAMSS_7280,
 	.pd_name = "top",
@@ -5747,6 +6040,7 @@ static const struct of_device_id camss_dt_match[] = {
 	{ .compatible = "qcom,qcm2290-camss", .data = &qcm2290_resources },
 	{ .compatible = "qcom,qcs8300-camss", .data = &qcs8300_resources },
 	{ .compatible = "qcom,sa8775p-camss", .data = &sa8775p_resources },
+	{ .compatible = "qcom,sc7180-camss", .data = &sc7180_resources },
 	{ .compatible = "qcom,sc7280-camss", .data = &sc7280_resources },
 	{ .compatible = "qcom,sc8280xp-camss", .data = &sc8280xp_resources },
 	{ .compatible = "qcom,sdm660-camss", .data = &sdm660_resources },

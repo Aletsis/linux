@@ -573,10 +573,8 @@ static int csid_set_clock_rates(struct csid_device *csid)
 				return -EINVAL;
 			}
 
-			/* if sensor pixel clock is not available */
-			/* set highest possible CSID clock rate */
-			if (min_rate == 0)
-				j = clock->nfreqs - 1;
+			/* For high-throughput sensors run CSID at max rate */
+			j = clock->nfreqs - 1;
 
 			rate = clk_round_rate(clock->clk, clock->freq[j]);
 			if (rate < 0) {
@@ -590,6 +588,8 @@ static int csid_set_clock_rates(struct csid_device *csid)
 				dev_err(dev, "clk set rate failed: %d\n", ret);
 				return ret;
 			}
+			dev_info(dev, "csid%d: clock %s set to %ld Hz (requested %u)\n",
+				 csid->id, clock->name, rate, clock->freq[j]);
 		} else if (clock->nfreqs) {
 			/*
 			 * cphy_rx_src is shared with the CSIPHYs and carries the PHY
@@ -1302,6 +1302,7 @@ static int csid_link_setup(struct media_entity *entity,
 			lane_cfg = &csiphy->cfg.csi2->lane_cfg;
 			csid->phy.lane_cnt = lane_cfg->num_data;
 			csid->phy.lane_assign = csid_get_lane_assign(lane_cfg, lane_cfg->num_data);
+			csid->phy.is_cphy = lane_cfg->is_cphy;
 			csid->tpg_linked = false;
 		}
 	}
