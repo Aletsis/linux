@@ -160,6 +160,7 @@ static const char * const s5k5e9_supply_names[] = {
 };
 
 struct s5k5e9 {
+	struct device_link *lens_link;
 	struct clk *xvclk;
 	struct v4l2_subdev sd;
 	struct media_pad pad;
@@ -684,6 +685,34 @@ static int s5k5e9_parse_of(struct s5k5e9 *s5k5e9)
 	return 0;
 }
 
+
+/*
+ * libcamera keeps the lens sub-device open for as long as the camera manager
+ * runs, so the focus actuator cannot rely on open()/close() for its power.
+ * Make it a runtime-PM supplier of the sensor instead: it is then powered
+ * exactly while the sensor is, and restores its position on resume.
+ */
+static struct device_link *s5k5e9_link_lens(struct device *dev)
+{
+	struct fwnode_handle *lens;
+	struct device_link *link;
+	struct device *lens_dev;
+
+	lens = fwnode_find_reference(dev_fwnode(dev), "lens-focus", 0);
+	if (IS_ERR(lens))
+		return NULL;
+	lens_dev = bus_find_device_by_fwnode(&i2c_bus_type, lens);
+	fwnode_handle_put(lens);
+	if (!lens_dev)
+		return NULL;
+	link = device_link_add(dev, lens_dev,
+			       DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
+	put_device(lens_dev);
+	if (!link)
+		dev_warn(dev, "failed to link the lens actuator\n");
+	return link;
+}
+
 static int s5k5e9_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -756,6 +785,8 @@ static int s5k5e9_probe(struct i2c_client *client)
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
 
+	s5k5e9->lens_link = s5k5e9_link_lens(dev);
+
 	ret = v4l2_async_register_subdev_sensor(sd);
 	if (ret) {
 		dev_err(dev, "v4l2 async register subdev failed\n");
@@ -768,6 +799,8 @@ static int s5k5e9_probe(struct i2c_client *client)
 	return 0;
 
 err_power_off:
+	if (s5k5e9->lens_link)
+		device_link_del(s5k5e9->lens_link);
 	pm_runtime_disable(dev);
 	pm_runtime_put_noidle(dev);
 	s5k5e9_power_off(dev);
@@ -792,6 +825,8 @@ static void s5k5e9_remove(struct i2c_client *client)
 	if (!pm_runtime_status_suspended(&client->dev))
 		s5k5e9_power_off(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
+	if (s5k5e9->lens_link)
+		device_link_del(s5k5e9->lens_link);
 }
 
 static const struct dev_pm_ops s5k5e9_pm_ops = {
