@@ -864,7 +864,7 @@ static int smb5_probe(struct platform_device *pdev)
 	    chip->ceiling_ua % SMB5_ICL_STEP_UA)
 		return dev_err_probe(dev, -EINVAL, "Input current limit out of range\n");
 
-	chip->source = devm_power_supply_get_by_phandle(dev, "power-supplies");
+	chip->source = devm_power_supply_get_by_reference(dev, "power-supplies");
 	if (IS_ERR(chip->source)) {
 		return dev_err_probe(dev, PTR_ERR(chip->source),
 				     "Cannot get input power supply\n");

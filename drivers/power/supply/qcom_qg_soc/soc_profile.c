@@ -4,7 +4,7 @@ static int qcom_qg_soc_profile_init(struct qcom_qg_chip *chip)
 {
 	struct power_supply_battery_info *info = chip->batt_info;
 	const struct power_supply_battery_ocv_table *table;
-	struct sha256_state digest;
+	struct sha256_ctx digest;
 	u8 value[4];
 	int i, j, count = 0;
 
