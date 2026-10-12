@@ -197,7 +197,8 @@ static void q6voice_session_callback(struct q6voice_session *s,
 	wake_up(&s->wait);
 }
 
-int q6voice_common_callback(struct apr_device *adev, struct apr_resp_pkt *data)
+int q6voice_common_callback(struct apr_device *adev,
+			    const struct apr_resp_pkt *data)
 {
 	struct device *dev = &adev->dev;
 	struct q6voice_service *v = dev_get_drvdata(dev);
