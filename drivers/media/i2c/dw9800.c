@@ -87,6 +87,7 @@ struct dw9800 {
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *focus;
 	struct v4l2_subdev sd;
+	atomic_t open_power;
 
 	u32 sac_mode;
 	u32 sac_timing;
@@ -209,8 +210,15 @@ static int dw9800_set_ctrl(struct v4l2_ctrl *ctrl)
 	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE) {
 		struct i2c_client *client = v4l2_get_subdevdata(&dw9800_dev->sd);
 
+		int ret;
+
 		dw9800_dev->focus->val = ctrl->val;
-		return dw9800_set_dac(client, ctrl->val);
+		/* Not powered: dw9800_resume() moves the lens to focus->val. */
+		if (pm_runtime_get_if_in_use(&client->dev) <= 0)
+			return 0;
+		ret = dw9800_set_dac(client, ctrl->val);
+		pm_runtime_put(&client->dev);
+		return ret;
 	}
 
 	return -EINVAL;
@@ -220,14 +228,36 @@ static const struct v4l2_ctrl_ops dw9800_ctrl_ops = {
 	.s_ctrl = dw9800_set_ctrl,
 };
 
+/*
+ * A sensor driver may link this actuator as its runtime-PM supplier (see the
+ * "lens-focus" handling in the sensor drivers). It is then powered together
+ * with the sensor, and open()/close() must not hold it on: libcamera keeps
+ * the sub-device open permanently. Without such a link keep the old behaviour.
+ */
+static bool dw9800_powered_by_sensor(struct v4l2_subdev *sd)
+{
+	return !list_empty(&sd->dev->links.consumers);
+}
+
 static int dw9800_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
-	return pm_runtime_resume_and_get(sd->dev);
+	struct dw9800 *dw9800_dev = sd_to_dw9800(sd);
+	int ret;
+
+	if (dw9800_powered_by_sensor(sd))
+		return 0;
+	ret = pm_runtime_resume_and_get(sd->dev);
+	if (!ret)
+		atomic_inc(&dw9800_dev->open_power);
+	return ret;
 }
 
 static int dw9800_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
-	pm_runtime_put(sd->dev);
+	struct dw9800 *dw9800_dev = sd_to_dw9800(sd);
+
+	if (atomic_dec_if_positive(&dw9800_dev->open_power) >= 0)
+		pm_runtime_put(sd->dev);
 
 	return 0;
 }

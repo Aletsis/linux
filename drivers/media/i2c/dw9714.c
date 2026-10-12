@@ -43,6 +43,7 @@ struct dw9714_device {
 	struct v4l2_subdev sd;
 	u16 current_val;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(dw9714_supply_names)];
+	atomic_t open_power;
 };
 
 static inline struct dw9714_device *to_dw9714_vcm(struct v4l2_ctrl *ctrl)
@@ -81,8 +82,19 @@ static int dw9714_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct dw9714_device *dev_vcm = to_dw9714_vcm(ctrl);
 
-	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE)
-		return dw9714_t_focus_vcm(dev_vcm, ctrl->val);
+	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE) {
+		struct device *dev = dev_vcm->sd.dev;
+		int ret;
+
+		/* Not powered: dw9714_vcm_resume() moves to current_val. */
+		if (pm_runtime_get_if_in_use(dev) <= 0) {
+			dev_vcm->current_val = ctrl->val;
+			return 0;
+		}
+		ret = dw9714_t_focus_vcm(dev_vcm, ctrl->val);
+		pm_runtime_put(dev);
+		return ret;
+	}
 
 	return -EINVAL;
 }
@@ -91,14 +103,36 @@ static const struct v4l2_ctrl_ops dw9714_vcm_ctrl_ops = {
 	.s_ctrl = dw9714_set_ctrl,
 };
 
+/*
+ * A sensor driver may link this actuator as its runtime-PM supplier (see the
+ * "lens-focus" handling in the sensor drivers). It is then powered together
+ * with the sensor, and open()/close() must not hold it on: libcamera keeps
+ * the sub-device open permanently. Without such a link keep the old behaviour.
+ */
+static bool dw9714_powered_by_sensor(struct v4l2_subdev *sd)
+{
+	return !list_empty(&sd->dev->links.consumers);
+}
+
 static int dw9714_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
-	return pm_runtime_resume_and_get(sd->dev);
+	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
+	int ret;
+
+	if (dw9714_powered_by_sensor(sd))
+		return 0;
+	ret = pm_runtime_resume_and_get(sd->dev);
+	if (!ret)
+		atomic_inc(&dw9714_dev->open_power);
+	return ret;
 }
 
 static int dw9714_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
-	pm_runtime_put(sd->dev);
+	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
+
+	if (atomic_dec_if_positive(&dw9714_dev->open_power) >= 0)
+		pm_runtime_put(sd->dev);
 
 	return 0;
 }
