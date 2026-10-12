@@ -497,25 +497,15 @@ static int __maybe_unused cci_resume_runtime(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused cci_suspend(struct device *dev)
-{
-	if (!pm_runtime_suspended(dev))
-		return cci_suspend_runtime(dev);
-
-	return 0;
-}
-
-static int __maybe_unused cci_resume(struct device *dev)
-{
-	cci_resume_runtime(dev);
-	pm_runtime_mark_last_busy(dev);
-	pm_request_autosuspend(dev);
-
-	return 0;
-}
-
+/*
+ * The old system resume handler called cci_resume_runtime() unconditionally.
+ * When the controller was runtime suspended at system suspend, with its power
+ * domain off, that enabled the clocks against a powered-down domain:
+ * "cam_cc_camnoc_axi_clk status stuck at 'off'". Let the runtime-PM helpers
+ * resume it only if it was active.
+ */
 static const struct dev_pm_ops qcom_cci_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(cci_suspend, cci_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(cci_suspend_runtime, cci_resume_runtime, NULL)
 };
 
