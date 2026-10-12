@@ -18,6 +18,14 @@
 
 #define AW8624_CHIPID			0x24
 #define AW8695_CHIPID			0x95
+
+/*
+ * The AW8624 has no boost converter and lays out 0x31-0x3c and 0x46-0x47
+ * differently: 0x31-0x35 are its waveform and brake controls, not the AW8695
+ * boost registers.
+ */
+#define AW8624_ANACTRL			0x38
+#define AW8624_GLB_STATE		0x47
 #define AW8695_RESET			0xaa
 /* Default of BASE_ADDR* registers */
 #define AW8695_RAM_BASE_ADDR		0x800
@@ -501,6 +509,7 @@ struct aw8695_data {
 	struct i2c_client *client;
 	struct regmap *regmap;
 	struct gpio_desc *reset_gpio;
+	bool is_aw8624;
 	bool running;
 	struct work_struct play_work;
 	/* Parameters from devicetree */
@@ -565,6 +574,16 @@ static const struct aw8695_sram_waveform_header sram_waveform_header = {
 		}
 	}
 };
+
+static unsigned int aw8695_glb_state_reg(struct aw8695_data *haptics)
+{
+	return haptics->is_aw8624 ? AW8624_GLB_STATE : AW8695_GLB_STATE;
+}
+
+static unsigned int aw8695_anactrl_reg(struct aw8695_data *haptics)
+{
+	return haptics->is_aw8624 ? AW8624_ANACTRL : AW8695_ANACTRL;
+}
 
 static int aw8695_interrupt_clear(struct aw8695_data *haptics)
 {
@@ -671,7 +690,8 @@ static int aw8695_haptics_stop(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	err = regmap_read_poll_timeout(haptics->regmap, AW8695_GLB_STATE, read_buf,
+	err = regmap_read_poll_timeout(haptics->regmap,
+			aw8695_glb_state_reg(haptics), read_buf,
 			(read_buf & 0x0f) == 0, 2000, 2000 * 100);
 	if (err) {
 		dev_err(dev, "Did not enter standby: %d\n", err);
@@ -856,7 +876,7 @@ static int aw8695_haptic_get_f0(struct aw8695_data *haptics)
 		return err;
 
 	/* LRA OSC Source */
-	err = regmap_update_bits(haptics->regmap, AW8695_ANACTRL,
+	err = regmap_update_bits(haptics->regmap, aw8695_anactrl_reg(haptics),
 		AW8695_ANACTRL_LRA_SRC_MASK, AW8695_ANACTRL_LRA_SRC_REG);
 	if (err)
 		return err;
@@ -906,7 +926,8 @@ static int aw8695_haptic_get_f0(struct aw8695_data *haptics)
 		(haptics->f0_det_trace + haptics->f0_det_wait) * (haptics->f0_det_repeat - 1));
 	usleep_range(f0_trace_ms * 1000, f0_trace_ms * 1000 + 500);
 
-	err = regmap_read_poll_timeout(haptics->regmap, AW8695_GLB_STATE, read_buf,
+	err = regmap_read_poll_timeout(haptics->regmap,
+			aw8695_glb_state_reg(haptics), read_buf,
 			(read_buf & 0x0f) == 0, 10000, 10000 * 50);
 	if (err) {
 		dev_err(dev, "Did not enter standby: %d\n", err);
@@ -1014,6 +1035,7 @@ static int aw8695_init(struct aw8695_data *haptics)
 			AW8624_CHIPID, AW8695_CHIPID, read_buf);
 		return -ENODEV;
 	}
+	haptics->is_aw8624 = read_buf == AW8624_CHIPID;
 
 	err = regmap_write(haptics->regmap, AW8695_ID, AW8695_RESET);
 	if (err) {
@@ -1071,15 +1093,20 @@ static int aw8695_init(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	err = regmap_write(haptics->regmap, AW8695_BSTDBG1, haptics->boost_debug[0]);
-	if (err)
-		return err;
-	err = regmap_write(haptics->regmap, AW8695_BSTDBG2, haptics->boost_debug[1]);
-	if (err)
-		return err;
-	err = regmap_write(haptics->regmap, AW8695_BSTDBG3, haptics->boost_debug[2]);
-	if (err)
-		return err;
+	if (!haptics->is_aw8624) {
+		err = regmap_write(haptics->regmap, AW8695_BSTDBG1,
+				   haptics->boost_debug[0]);
+		if (err)
+			return err;
+		err = regmap_write(haptics->regmap, AW8695_BSTDBG2,
+				   haptics->boost_debug[1]);
+		if (err)
+			return err;
+		err = regmap_write(haptics->regmap, AW8695_BSTDBG3,
+				   haptics->boost_debug[2]);
+		if (err)
+			return err;
+	}
 	err = regmap_write(haptics->regmap, AW8695_TSET, haptics->tset);
 	if (err)
 		return err;
@@ -1087,16 +1114,18 @@ static int aw8695_init(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	err = regmap_update_bits(haptics->regmap, AW8695_ANADBG,
-		AW8695_ANADBG_IOC_MASK, AW8695_ANADBG_IOC_4P65A);
-	if (err)
-		return err;
+	if (!haptics->is_aw8624) {
+		err = regmap_update_bits(haptics->regmap, AW8695_ANADBG,
+			AW8695_ANADBG_IOC_MASK, AW8695_ANADBG_IOC_4P65A);
+		if (err)
+			return err;
 
-	/* Set boost peak current */
-	err = regmap_update_bits(haptics->regmap, AW8695_BSTCFG,
-		AW8695_BSTCFG_PEAKCUR_MASK, AW8695_BSTCFG_PEAKCUR_2A);
-	if (err)
-		return err;
+		/* Set boost peak current */
+		err = regmap_update_bits(haptics->regmap, AW8695_BSTCFG,
+			AW8695_BSTCFG_PEAKCUR_MASK, AW8695_BSTCFG_PEAKCUR_2A);
+		if (err)
+			return err;
+	}
 
 	/* Adjust motorprotect config */
 	err = regmap_update_bits(haptics->regmap, AW8695_DETCTRL,
@@ -1113,11 +1142,13 @@ static int aw8695_init(struct aw8695_data *haptics)
 		return err;
 
 	/* Adjust auto boost config */
-	err = regmap_update_bits(haptics->regmap, AW8695_BST_AUTO,
-		AW8695_BST_AUTO_BST_AUTOSW_MASK,
-		AW8695_BST_AUTO_BST_MANUAL_BOOST);
-	if (err)
-		return err;
+	if (!haptics->is_aw8624) {
+		err = regmap_update_bits(haptics->regmap, AW8695_BST_AUTO,
+			AW8695_BST_AUTO_BST_AUTOSW_MASK,
+			AW8695_BST_AUTO_BST_MANUAL_BOOST);
+		if (err)
+			return err;
+	}
 
 	err = aw8695_haptic_offset_calibration(haptics);
 	if (err)
