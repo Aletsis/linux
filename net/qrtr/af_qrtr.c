@@ -5,6 +5,7 @@
  */
 #include <linux/module.h>
 #include <linux/netlink.h>
+#include <linux/pm_wakeup.h>
 #include <linux/qrtr.h>
 #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
 #include <linux/spinlock.h>
@@ -91,6 +92,8 @@ struct qrtr_sock {
 	struct sock sk;
 	struct sockaddr_qrtr us;
 	struct sockaddr_qrtr peer;
+	/* Creator of the socket, to tell who a wakeup was for. */
+	char comm[TASK_COMM_LEN];
 };
 
 static inline struct qrtr_sock *qrtr_sk(struct sock *sk)
@@ -150,6 +153,29 @@ struct qrtr_tx_flow {
 
 #define QRTR_TX_FLOW_HIGH	10
 #define QRTR_TX_FLOW_LOW	5
+
+/*
+ * Packets from this node to user-space sockets wake the system from suspend;
+ * -1 disables it.
+ * On Qualcomm SoCs node 0 is the modem: an incoming call or SMS only shows
+ * up as a QRTR packet, and the transport interrupt alone does not abort
+ * suspend-to-idle. Other nodes are left out on purpose: a sensor hub
+ * streaming samples would keep the system awake. The downstream kernels
+ * do the same ("create wakeup source for only NID = 0").
+ */
+static int qrtr_wakeup_nid;
+module_param_named(wakeup_nid, qrtr_wakeup_nid, int, 0644);
+MODULE_PARM_DESC(wakeup_nid, "Node whose packets wake the system (default 0, -1 to disable)");
+
+/*
+ * One wakeup source for the whole router, registered at init: registering it
+ * in qrtr_endpoint_register() lengthens the time a transport spends in probe
+ * before it can accept packets, and a HELLO lost there leaves the link dead.
+ */
+static struct wakeup_source *qrtr_ws;
+
+/* Long enough for the packet to reach its socket and userspace to react. */
+#define QRTR_WAKEUP_TIMEOUT_MS	2000
 
 static int qrtr_local_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 			      int type, struct sockaddr_qrtr *from,
@@ -526,6 +552,24 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 		ipc = qrtr_port_lookup(cb->dst_port);
 		if (!ipc)
 			goto err;
+
+		/*
+		 * Only packets for user space wake the system. In-kernel QMI
+		 * clients (e.g. ath10k, whose firmware lives in the modem) talk
+		 * to the modem from their suspend callbacks; waking for their
+		 * replies would abort every suspend.
+		 */
+		if (qrtr_wakeup_nid >= 0 && cb->src_node == qrtr_wakeup_nid &&
+		    !ipc->sk.sk_kern_sock) {
+			const u8 *qmi = data + hdrlen;
+
+			/* QMI header: type, txn id (le16), message id (le16). */
+			pr_debug("qrtr: wakeup: %u:%u -> port %u (%s), %zu bytes, qmi type %u msg 0x%04x\n",
+				 cb->src_node, cb->src_port, cb->dst_port,
+				 ipc->comm, size, size >= 5 ? qmi[0] : 0,
+				 size >= 5 ? qmi[3] | qmi[4] << 8 : 0);
+			pm_wakeup_ws_event(qrtr_ws, QRTR_WAKEUP_TIMEOUT_MS, true);
+		}
 
 		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
 			qrtr_port_put(ipc);
@@ -1281,6 +1325,7 @@ static int qrtr_create(struct net *net, struct socket *sock,
 	sock->ops = &qrtr_proto_ops;
 
 	ipc = qrtr_sk(sk);
+	get_task_comm(ipc->comm, current);
 	ipc->us.sq_family = AF_QIPCRTR;
 	ipc->us.sq_node = qrtr_local_nid;
 	ipc->us.sq_port = 0;
@@ -1310,6 +1355,8 @@ static int __init qrtr_proto_init(void)
 	if (rc)
 		goto err_sock;
 
+	qrtr_ws = wakeup_source_register(NULL, "qrtr");
+
 	return 0;
 
 err_sock:
@@ -1322,6 +1369,7 @@ postcore_initcall(qrtr_proto_init);
 
 static void __exit qrtr_proto_fini(void)
 {
+	wakeup_source_unregister(qrtr_ws);
 	qrtr_ns_remove();
 	sock_unregister(qrtr_family.family);
 	proto_unregister(&qrtr_proto);
