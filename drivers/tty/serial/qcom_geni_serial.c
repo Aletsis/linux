@@ -1982,6 +1982,7 @@ static int qcom_geni_serial_suspend(struct device *dev)
 	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
 	struct uart_port *uport = &port->uport;
 	struct qcom_geni_private_data *private_data = uport->private_data;
+	int ret;
 
 	/*
 	 * This is done so we can hit the lowest possible state in suspend
@@ -1991,7 +1992,20 @@ static int qcom_geni_serial_suspend(struct device *dev)
 		geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ACTIVE_ONLY);
 		geni_icc_set_bw(&port->se);
 	}
-	return uart_suspend_port(private_data->drv, uport);
+
+	/*
+	 * uart_suspend_port() marks the port suspended before it stops RX and
+	 * shuts the port down, and qcom_geni_serial_isr() ignores interrupts
+	 * for a suspended port without acking them. An interrupt raised in
+	 * between (cancelling RX is enough) then storms until the core disables
+	 * the line for good. Keep it masked until the port has been quiesced;
+	 * a port that stays active for wakeup or as console gets it back here.
+	 */
+	disable_irq(uport->irq);
+	ret = uart_suspend_port(private_data->drv, uport);
+	enable_irq(uport->irq);
+
+	return ret;
 }
 
 static int qcom_geni_serial_resume(struct device *dev)
