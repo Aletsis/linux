@@ -155,7 +155,8 @@ struct qrtr_tx_flow {
 #define QRTR_TX_FLOW_LOW	5
 
 /*
- * Packets from this node wake the system from suspend; -1 disables it.
+ * Packets from this node to user-space sockets wake the system from suspend;
+ * -1 disables it.
  * On Qualcomm SoCs node 0 is the modem: an incoming call or SMS only shows
  * up as a QRTR packet, and the transport interrupt alone does not abort
  * suspend-to-idle. Other nodes are left out on purpose: a sensor hub
@@ -535,9 +536,6 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 
 	qrtr_node_assign(node, cb->src_node);
 
-	if (qrtr_wakeup_nid >= 0 && cb->src_node == qrtr_wakeup_nid)
-		pm_wakeup_ws_event(node->ws, QRTR_WAKEUP_TIMEOUT_MS, true);
-
 	if (cb->type == QRTR_TYPE_NEW_SERVER) {
 		/* Remote node endpoint can bridge other distant nodes */
 		const struct qrtr_ctrl_pkt *pkt;
@@ -552,6 +550,16 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 		ipc = qrtr_port_lookup(cb->dst_port);
 		if (!ipc)
 			goto err;
+
+		/*
+		 * Only packets for user space wake the system. In-kernel QMI
+		 * clients (e.g. ath10k, whose firmware lives in the modem) talk
+		 * to the modem from their suspend callbacks; waking for their
+		 * replies would abort every suspend.
+		 */
+		if (qrtr_wakeup_nid >= 0 && cb->src_node == qrtr_wakeup_nid &&
+		    !ipc->sk.sk_kern_sock)
+			pm_wakeup_ws_event(node->ws, QRTR_WAKEUP_TIMEOUT_MS, true);
 
 		if (sock_queue_rcv_skb(&ipc->sk, skb)) {
 			qrtr_port_put(ipc);
