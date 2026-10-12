@@ -5,6 +5,7 @@
  */
 #include <linux/module.h>
 #include <linux/netlink.h>
+#include <linux/pm_wakeup.h>
 #include <linux/qrtr.h>
 #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
 #include <linux/spinlock.h>
@@ -118,6 +119,7 @@ static DEFINE_XARRAY_ALLOC(qrtr_ports);
  * @ep: endpoint
  * @ref: reference count for node
  * @nid: node id
+ * @ws: wakeup source, triggered for packets from the wakeup node
  * @qrtr_tx_flow: tree of qrtr_tx_flow, keyed by node << 32 | port
  * @qrtr_tx_lock: lock for qrtr_tx_flow inserts
  * @rx_queue: receive queue
@@ -128,6 +130,7 @@ struct qrtr_node {
 	struct qrtr_endpoint *ep;
 	struct kref ref;
 	unsigned int nid;
+	struct wakeup_source *ws;
 
 	struct radix_tree_root qrtr_tx_flow;
 	struct mutex qrtr_tx_lock; /* for qrtr_tx_flow */
@@ -150,6 +153,21 @@ struct qrtr_tx_flow {
 
 #define QRTR_TX_FLOW_HIGH	10
 #define QRTR_TX_FLOW_LOW	5
+
+/*
+ * Packets from this node wake the system from suspend; -1 disables it.
+ * On Qualcomm SoCs node 0 is the modem: an incoming call or SMS only shows
+ * up as a QRTR packet, and the transport interrupt alone does not abort
+ * suspend-to-idle. Other nodes are left out on purpose: a sensor hub
+ * streaming samples would keep the system awake. The downstream kernels
+ * do the same ("create wakeup source for only NID = 0").
+ */
+static int qrtr_wakeup_nid;
+module_param_named(wakeup_nid, qrtr_wakeup_nid, int, 0644);
+MODULE_PARM_DESC(wakeup_nid, "Node whose packets wake the system (default 0, -1 to disable)");
+
+/* Long enough for the packet to reach its socket and userspace to react. */
+#define QRTR_WAKEUP_TIMEOUT_MS	2000
 
 static int qrtr_local_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 			      int type, struct sockaddr_qrtr *from,
@@ -187,6 +205,7 @@ static void __qrtr_node_release(struct kref *kref)
 	mutex_unlock(&qrtr_node_lock);
 
 	skb_queue_purge(&node->rx_queue);
+	wakeup_source_unregister(node->ws);
 
 	/* Free tx flow counters */
 	radix_tree_for_each_slot(slot, &node->qrtr_tx_flow, &iter, 0) {
@@ -516,6 +535,9 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 
 	qrtr_node_assign(node, cb->src_node);
 
+	if (qrtr_wakeup_nid >= 0 && cb->src_node == qrtr_wakeup_nid)
+		pm_wakeup_ws_event(node->ws, QRTR_WAKEUP_TIMEOUT_MS, true);
+
 	if (cb->type == QRTR_TYPE_NEW_SERVER) {
 		/* Remote node endpoint can bridge other distant nodes */
 		const struct qrtr_ctrl_pkt *pkt;
@@ -601,6 +623,9 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 
 	INIT_RADIX_TREE(&node->qrtr_tx_flow, GFP_KERNEL);
 	mutex_init(&node->qrtr_tx_lock);
+
+	/* Registered here because qrtr_endpoint_post() may run in atomic context. */
+	node->ws = wakeup_source_register(NULL, "qrtr");
 
 	qrtr_node_assign(node, nid);
 
