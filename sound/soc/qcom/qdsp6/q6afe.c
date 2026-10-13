@@ -382,6 +382,7 @@ struct q6afe {
 	wait_queue_head_t wait;
 	struct list_head port_list;
 	spinlock_t port_list_lock;
+	u32 core_hw_handle;
 };
 
 struct afe_port_cmd_device_start {
@@ -994,6 +995,8 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 				wake_up(&afe->wait);
 			}
 			break;
+		case AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST:
+			break;
 		default:
 			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
 			break;
@@ -1001,8 +1004,10 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 	}
 		break;
 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
+		/* The payload is the client handle needed to drop the vote. */
+		afe->core_hw_handle = *(const u32 *)data->payload;
+		afe->result.status = 0;
 		afe->result.opcode = hdr->opcode;
-		afe->result.status = res->status;
 		wake_up(&afe->wait);
 		break;
 	default:
@@ -1897,10 +1902,14 @@ int q6afe_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
 
 	ret = afe_apr_send_pkt(afe, pkt, NULL,
 			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
-	if (ret)
+	if (ret) {
 		dev_err(afe->dev, "AFE failed to vote (%d)\n", hw_block_id);
+		return ret;
+	}
+	/* Votes are serialised by the clock framework's prepare lock. */
+	*client_handle = afe->core_hw_handle;
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(q6afe_vote_lpass_core_hw);
 
