@@ -266,6 +266,12 @@ struct qcom_qg_chip {
 	/* Voltage near the PMIC cutoff under load: report 0% without re-seeding. */
 	unsigned int soc_critical_count;
 	bool soc_critical;
+	/* Counter carried across a system suspend, which never loses power. */
+	bool soc_suspend_valid;
+	bool soc_resume_pending;
+	int soc_suspend_design_uah;
+	s64 soc_suspend_relative_uah;
+	u64 soc_suspend_ns;
 };
 
 static void qcom_qg_soc_debug(struct qcom_qg_chip *chip)
@@ -1116,7 +1122,20 @@ static void qcom_qg_soc_stop(void *data)
 static int qcom_qg_suspend(struct device *dev)
 {
 	struct qcom_qg_chip *chip = dev_get_drvdata(dev);
+	struct qg_experimental_soc *soc = &chip->integrated_soc.soc;
 
+	mutex_lock(&chip->fifo_lock);
+	if (experimental_soc && soc->valid) {
+		chip->soc_suspend_design_uah = soc->design_uah;
+		chip->soc_suspend_relative_uah = soc->relative_uah;
+		chip->soc_suspend_valid = true;
+	} else {
+		/* Suspended again before the last resume was sampled. */
+		chip->soc_suspend_valid = experimental_soc && chip->soc_resume_pending;
+	}
+	chip->soc_resume_pending = false;
+	chip->soc_suspend_ns = ktime_get_boottime_ns();
+	mutex_unlock(&chip->fifo_lock);
 	qcom_qg_soc_pause(chip);
 	qcom_qg_ocv_irq_disable(chip);
 	mutex_lock(&chip->fifo_lock);
@@ -1129,6 +1148,36 @@ static int qcom_qg_suspend(struct device *dev)
 	mutex_unlock(&chip->fifo_lock);
 	qcom_qg_ocv_notify(chip);
 	return 0;
+}
+
+/*
+ * The pause on suspend drops the counter, and the SDAM record is only trusted
+ * for QG_SOC_RESTORE_MAX_AGE_S because it may have survived a long power-off.
+ * A system suspend is different: the phone stayed powered, so the count taken
+ * at suspend is still good whatever the sleep lasted. The gauge keeps sampling
+ * while the AP sleeps, so the averaged current found on resume stands for the
+ * sleep current; this is a sampled estimate, not an integration.
+ */
+static void qcom_qg_soc_resume_prepare(struct qcom_qg_chip *chip)
+{
+	u64 slept_ns = ktime_get_boottime_ns() - chip->soc_suspend_ns;
+	s64 relative = chip->soc_suspend_relative_uah;
+	int design = chip->soc_suspend_design_uah;
+	int current_ua;
+
+	lockdep_assert_held(&chip->fifo_lock);
+	if (!chip->soc_suspend_valid || design <= 0)
+		return;
+	chip->soc_suspend_valid = false;
+	if (qcom_qg_get_current(chip, QG_S2_NORMAL_AVG_I_DATA0_REG, &current_ua))
+		current_ua = 0;
+	relative += div_s64((s64)current_ua * (s64)div_u64(slept_ns, NSEC_PER_MSEC),
+			    3600 * MSEC_PER_SEC);
+	chip->soc_suspend_relative_uah = clamp_t(s64, relative, -(s64)design, 0);
+	chip->soc_resume_pending = true;
+	dev_dbg(chip->dev, "resume: slept %llu s at %d uA average, counter %lld uAh of %d\n",
+		div_u64(slept_ns, NSEC_PER_SEC), current_ua,
+		chip->soc_suspend_relative_uah, design);
 }
 
 static int qcom_qg_resume(struct device *dev)
@@ -1145,6 +1194,7 @@ static int qcom_qg_resume(struct device *dev)
 	if (experimental_soc) {
 		qg_soc_integration_resume(&chip->integrated_soc,
 					  ktime_get_boottime_ns());
+		qcom_qg_soc_resume_prepare(chip);
 		qcom_qg_soc_debug(chip);
 	}
 	/* Re-advertise a cached value hidden from getters during suspension. */
@@ -1291,6 +1341,16 @@ static void qcom_qg_soc_work(struct work_struct *work)
 				   observation.floor_voltage_uv);
 	if (observation.ocv_soc_milli < 0 || observation.floor_soc_milli < 0)
 		observation.ocv_valid = false;
+	if (chip->integrated_soc.soc.valid) {
+		chip->soc_resume_pending = false;
+	} else if (observed && chip->soc_resume_pending &&
+		   observation.environment.phase != 1) {
+		chip->soc_resume_pending = false;
+		qcom_qg_soc_seed(&chip->integrated_soc.soc,
+				 chip->soc_suspend_design_uah,
+				 chip->soc_suspend_relative_uah,
+				 observation.environment.time_ns);
+	}
 	if (observed && ret_temp >= 0 && !chip->integrated_soc.soc.valid &&
 	    observation.environment.phase != 1 &&
 	    !qcom_qg_soc_restore(chip, temp_mc / 100,
